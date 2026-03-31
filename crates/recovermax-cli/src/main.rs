@@ -54,6 +54,7 @@ fn main() -> Result<()> {
             println!("  recovermax info <image>          Show image info");
             println!("  recovermax scan <image>          Scan for filesystems");
             println!("  recovermax recover <image> ...   Recover files");
+            println!("  recovermax deleted <image>       Scan for deleted files");
             println!("  recovermax carve <image> ...     Raw carve by signature");
             println!("  recovermax hexdump <image> ...   Hex dump region");
             println!();

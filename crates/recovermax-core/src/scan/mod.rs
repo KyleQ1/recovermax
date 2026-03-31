@@ -177,7 +177,12 @@ impl<'a> Scanner<'a> {
             return Ok(Some(info));
         }
 
-        // TODO: try ntfs, xfs, btrfs, etc.
+        // Try NTFS
+        if let Some(info) = fs::ntfs::detect(self.reader, offset) {
+            return Ok(Some(info));
+        }
+
+        // TODO: try xfs, btrfs, etc.
 
         Ok(None)
     }

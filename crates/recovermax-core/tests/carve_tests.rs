@@ -33,17 +33,17 @@ fn carve_jpeg_with_footer() {
     let mut img = vec![0u8; 4096];
     // JPEG at sector 0
     img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    // Footer at offset 500
-    img[500] = 0xFF; img[501] = 0xD9;
+    // Footer at offset 1500 (past the 512-byte min distance and 1KB min size)
+    img[1500] = 0xFF; img[1501] = 0xD9;
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
 
     assert_eq!(files.len(), 1);
     assert!(files[0].ends_with(".jpg"));
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    assert_eq!(carved.len(), 502); // header to footer inclusive
+    assert_eq!(carved.len(), 1502); // header to footer inclusive
     assert_eq!(&carved[0..3], &[0xFF, 0xD8, 0xFF]);
-    assert_eq!(&carved[500..502], &[0xFF, 0xD9]);
+    assert_eq!(&carved[1500..1502], &[0xFF, 0xD9]);
 }
 
 // --- PNG ---

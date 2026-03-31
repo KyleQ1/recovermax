@@ -1,8 +1,20 @@
+use std::io::Write;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::io::ImageReader;
 use super::{DirEntry, FileType, FsInfo};
+
+/// A deleted inode found by scanning inode tables
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedInode {
+    pub inode_num: u64,
+    pub size: u64,
+    pub file_type: FileType,
+    pub dtime: u32,
+    pub mode: u16,
+}
 
 // ext4 magic number at offset 0x38 in the superblock
 const EXT4_MAGIC: u16 = 0xEF53;
@@ -408,6 +420,238 @@ impl<'a> Ext4Fs<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Stream inode data to a writer incrementally, avoiding buffering the entire file.
+    /// Handles both extents and block maps (including indirect blocks).
+    pub fn stream_inode_data(&self, inode: &Inode, writer: &mut impl Write) -> Result<u64> {
+        if inode.uses_extents() {
+            self.stream_extent_data(inode, writer)
+        } else {
+            self.stream_block_map_data(inode, writer)
+        }
+    }
+
+    fn stream_extent_data(&self, inode: &Inode, writer: &mut impl Write) -> Result<u64> {
+        let target_size = inode.size;
+        let mut written: u64 = 0;
+        let extents = self.parse_extent_tree(&inode.block_data)?;
+
+        for extent in &extents {
+            if written >= target_size {
+                break;
+            }
+            let offset = self.block_offset(extent.start_block);
+            let len = extent.block_count as u64 * self.superblock.block_size() as u64;
+            let data = self.reader.read_at(offset, len as usize)?;
+
+            let to_write = (target_size - written).min(data.len() as u64) as usize;
+            writer.write_all(&data[..to_write])?;
+            written += to_write as u64;
+        }
+
+        Ok(written)
+    }
+
+    fn stream_block_map_data(&self, inode: &Inode, writer: &mut impl Write) -> Result<u64> {
+        let target_size = inode.size;
+        let mut written: u64 = 0;
+
+        // Direct blocks (entries 0-11)
+        for i in 0..12 {
+            if written >= target_size {
+                return Ok(written);
+            }
+            let block = u32::from_le_bytes(
+                inode.block_data[i * 4..(i + 1) * 4].try_into()?
+            ) as u64;
+            written = self.stream_block_or_hole(writer, block, written, target_size)?;
+        }
+
+        // Indirect block (entry 12)
+        if written < target_size {
+            let indirect_block = u32::from_le_bytes(
+                inode.block_data[48..52].try_into()?
+            ) as u64;
+            if indirect_block != 0 {
+                written = self.stream_indirect(writer, indirect_block, written, target_size)?;
+            }
+        }
+
+        // Double-indirect block (entry 13)
+        if written < target_size {
+            let dind_block = u32::from_le_bytes(
+                inode.block_data[52..56].try_into()?
+            ) as u64;
+            if dind_block != 0 {
+                written = self.stream_double_indirect(writer, dind_block, written, target_size)?;
+            }
+        }
+
+        // Triple-indirect block (entry 14)
+        if written < target_size {
+            let tind_block = u32::from_le_bytes(
+                inode.block_data[56..60].try_into()?
+            ) as u64;
+            if tind_block != 0 {
+                written = self.stream_triple_indirect(writer, tind_block, written, target_size)?;
+            }
+        }
+
+        Ok(written)
+    }
+
+    /// Write one block to the writer, or a block-sized hole (zeros) if block == 0.
+    /// Returns the new total bytes written, capped at target_size.
+    fn stream_block_or_hole(&self, writer: &mut impl Write, block: u64, written: u64, target_size: u64) -> Result<u64> {
+        let bs = self.superblock.block_size() as u64;
+        let remaining = target_size - written;
+        let to_write = bs.min(remaining) as usize;
+
+        if block == 0 {
+            // Sparse hole — write zeros. Use a stack buffer to avoid allocation.
+            let zeros = [0u8; 4096];
+            let mut left = to_write;
+            while left > 0 {
+                let chunk = left.min(zeros.len());
+                writer.write_all(&zeros[..chunk])?;
+                left -= chunk;
+            }
+        } else {
+            let data = self.read_block(block)?;
+            writer.write_all(&data[..to_write])?;
+        }
+
+        Ok(written + to_write as u64)
+    }
+
+    fn stream_indirect(&self, writer: &mut impl Write, indirect_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+        let ptrs = self.read_block(indirect_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if written >= target_size {
+                break;
+            }
+            let block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            written = self.stream_block_or_hole(writer, block, written, target_size)?;
+        }
+        Ok(written)
+    }
+
+    fn stream_double_indirect(&self, writer: &mut impl Write, dind_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+        let ptrs = self.read_block(dind_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if written >= target_size {
+                break;
+            }
+            let ind_block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            if ind_block != 0 {
+                written = self.stream_indirect(writer, ind_block, written, target_size)?;
+            }
+        }
+        Ok(written)
+    }
+
+    fn stream_triple_indirect(&self, writer: &mut impl Write, tind_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+        let ptrs = self.read_block(tind_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if written >= target_size {
+                break;
+            }
+            let dind_block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            if dind_block != 0 {
+                written = self.stream_double_indirect(writer, dind_block, written, target_size)?;
+            }
+        }
+        Ok(written)
+    }
+
+    /// Scan all block groups for deleted inodes.
+    /// A deleted inode has `dtime != 0` or `links_count == 0`, but still has
+    /// `size > 0` — meaning its data blocks may still be intact on disk.
+    pub fn scan_deleted_inodes(&self) -> Result<Vec<DeletedInode>> {
+        let mut deleted = Vec::new();
+        let inode_size = self.superblock.inode_size as usize;
+        let inodes_per_group = self.superblock.inodes_per_group;
+        let block_size = self.superblock.block_size() as usize;
+        let num_groups = (self.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+        let inodes_per_block = block_size / inode_size;
+
+        for group in 0..num_groups {
+            let bg = match self.read_group_descriptor(group) {
+                Ok(bg) => bg,
+                Err(_) => continue,
+            };
+            if bg.inode_table == 0 {
+                continue;
+            }
+
+            let inode_table_blocks = (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+
+            for tbl_block in 0..inode_table_blocks {
+                let abs_block = bg.inode_table + tbl_block as u64;
+                let block_data = match self.read_block(abs_block) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                for slot in 0..inodes_per_block {
+                    let local_index = tbl_block * inodes_per_block + slot;
+                    if local_index >= inodes_per_group as usize {
+                        break;
+                    }
+
+                    let inode_num = group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
+                    if inode_num <= 10 {
+                        continue;
+                    }
+
+                    let off = slot * inode_size;
+                    if off + inode_size > block_data.len() {
+                        break;
+                    }
+
+                    let data = &block_data[off..off + inode_size];
+                    let mode = u16::from_le_bytes([data[0], data[1]]);
+                    let size_lo = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+                    let links_count = u16::from_le_bytes([data[26], data[27]]);
+                    let dtime = u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
+                    let size_hi = if data.len() >= 112 {
+                        u32::from_le_bytes(data[108..112].try_into().unwrap_or([0; 4]))
+                    } else {
+                        0
+                    };
+                    let size = (size_hi as u64) << 32 | size_lo as u64;
+
+                    let is_deleted = dtime != 0 || links_count == 0;
+                    if !is_deleted || size == 0 || mode == 0 {
+                        continue;
+                    }
+
+                    let file_type = match mode & 0xF000 {
+                        0x4000 => FileType::Directory,
+                        0x8000 => FileType::RegularFile,
+                        0xA000 => FileType::Symlink,
+                        _ => FileType::Other,
+                    };
+
+                    deleted.push(DeletedInode {
+                        inode_num,
+                        size,
+                        file_type,
+                        dtime,
+                        mode,
+                    });
+                }
+            }
+        }
+
+        Ok(deleted)
     }
 }
 

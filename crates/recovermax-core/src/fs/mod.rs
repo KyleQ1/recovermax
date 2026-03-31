@@ -1,4 +1,5 @@
 pub mod ext4;
+pub mod ntfs;
 
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,4 @@
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -7,6 +8,10 @@ use crate::fs::ext4::Ext4Fs;
 use crate::fs::{DirEntry, FileType};
 use crate::io::ImageReader;
 use crate::scan::ScanReport;
+
+/// Files larger than this threshold are streamed directly to disk
+/// instead of buffered in memory. 1 MB.
+const STREAMING_THRESHOLD: u64 = 1024 * 1024;
 
 pub struct Recoverer<'a> {
     reader: &'a ImageReader,
@@ -116,19 +121,45 @@ impl<'a> Recoverer<'a> {
                         }
 
                         match ext4.read_inode(entry.inode) {
-                            Ok(inode) => match ext4.read_inode_data(&inode) {
-                                Ok(data) => {
-                                    std::fs::write(&dest_file, &data)?;
-                                    pb.inc(1);
+                            Ok(inode) => {
+                                if inode.size >= STREAMING_THRESHOLD {
+                                    // Stream large files directly to disk
+                                    match std::fs::File::create(&dest_file) {
+                                        Ok(file) => {
+                                            let mut writer = BufWriter::new(file);
+                                            match ext4.stream_inode_data(&inode, &mut writer) {
+                                                Ok(_) => { pb.inc(1); }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Failed to stream data for {}: {}",
+                                                        entry_path.display(), e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to create file {}: {}",
+                                                dest_file.display(), e
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Buffer small files in memory
+                                    match ext4.read_inode_data(&inode) {
+                                        Ok(data) => {
+                                            std::fs::write(&dest_file, &data)?;
+                                            pb.inc(1);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to read data for {}: {}",
+                                                entry_path.display(), e
+                                            );
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to read data for {}: {}",
-                                        entry_path.display(),
-                                        e
-                                    );
-                                }
-                            },
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     "Failed to read inode {} for {}: {}",

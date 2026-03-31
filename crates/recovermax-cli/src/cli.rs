@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Subcommand;
 
+use recovermax_core::fs::ext4::Ext4Fs;
+use recovermax_core::fs::FileType;
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::Scanner;
 use recovermax_core::carve;
@@ -74,6 +76,20 @@ pub enum Command {
         /// Number of bytes to dump
         #[arg(short, long, default_value = "512")]
         length: usize,
+    },
+
+    /// Scan for deleted files (inodes with dtime set or links_count=0)
+    Deleted {
+        /// Path to disk image or block device
+        image: PathBuf,
+
+        /// Recover a specific inode number
+        #[arg(short = 'r', long)]
+        recover: Option<u64>,
+
+        /// Destination directory for recovered file (required with -r)
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
     },
 }
 
@@ -168,6 +184,73 @@ pub fn run(args: Args) -> Result<()> {
             let data = reader.read_at(off, length)?;
             print_hexdump_pub(data, off);
             Ok(())
+        }
+
+        Command::Deleted { image, recover: recover_inode, dest } => {
+            let reader = ImageReader::open(&image)?;
+
+            // Find the first ext4 filesystem (check offset 0 first, then partitions)
+            let scanner = Scanner::new(&reader);
+            let report = scanner.full_scan()?;
+            let fs_info = report.filesystems.iter()
+                .find(|f| f.fs_type == "ext4")
+                .ok_or_else(|| anyhow::anyhow!("No ext4 filesystem found in image"))?;
+
+            let ext4 = Ext4Fs::new(&reader, fs_info.offset)?;
+
+            match recover_inode {
+                Some(inode_num) => {
+                    let dest = dest.ok_or_else(|| {
+                        anyhow::anyhow!("Destination required: use -d <path> to specify where to save the recovered file")
+                    })?;
+
+                    let inode = ext4.read_inode(inode_num)?;
+                    let data = ext4.read_inode_data(&inode)?;
+
+                    std::fs::create_dir_all(&dest)?;
+                    let filename = format!("inode-{}", inode_num);
+                    let dest_file = dest.join(&filename);
+                    std::fs::write(&dest_file, &data)?;
+
+                    println!("Recovered inode {} ({}) to {}",
+                        inode_num,
+                        bytesize::ByteSize(inode.size),
+                        dest_file.display(),
+                    );
+                    Ok(())
+                }
+                None => {
+                    println!("Scanning for deleted inodes...");
+                    let deleted = ext4.scan_deleted_inodes()?;
+
+                    if deleted.is_empty() {
+                        println!("No deleted inodes found.");
+                        return Ok(());
+                    }
+
+                    println!("Found {} deleted inodes:\n", deleted.len());
+                    println!("{:>8}  {:>12}  {:>10}  {}", "INODE", "SIZE", "DTIME", "TYPE");
+                    println!("{}", "-".repeat(50));
+
+                    for d in &deleted {
+                        let type_str = match d.file_type {
+                            FileType::RegularFile => "file",
+                            FileType::Directory => "dir",
+                            FileType::Symlink => "symlink",
+                            FileType::Other => "other",
+                        };
+                        println!("{:>8}  {:>12}  {:>10}  {}",
+                            d.inode_num,
+                            bytesize::ByteSize(d.size),
+                            d.dtime,
+                            type_str,
+                        );
+                    }
+
+                    println!("\nTo recover a file: recovermax deleted <image> -r <inode> -d <dest>");
+                    Ok(())
+                }
+            }
         }
     }
 }

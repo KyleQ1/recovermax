@@ -40,7 +40,7 @@ fn jpeg_with_false_footer_in_data() {
     // JPEG header at sector 0
     img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
 
-    // False footer at offset 100 (inside the "image data")
+    // False footer at offset 100 (inside the "image data", within 512 bytes of header)
     img[100] = 0xFF; img[101] = 0xD9;
 
     // Real footer at offset 2000
@@ -50,13 +50,11 @@ fn jpeg_with_false_footer_in_data() {
     assert_eq!(files.len(), 1);
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    // BUG: Current implementation finds the first footer at offset 102,
-    // not the real one at 2002. The carved file will be too small.
-    // A smarter carver would validate the JPEG structure.
+    // Smart carver skips the false footer at 100 (within 512 bytes of header)
+    // and finds the real footer at 2000, giving carved length 2002.
     assert_eq!(
-        carved.len(), 102,
-        "Current impl stops at first footer (102 bytes). \
-         A smarter impl would find the real footer at 2002."
+        carved.len(), 2002,
+        "Smart carver should skip false footer and find the real one at 2002."
     );
 }
 
@@ -91,20 +89,20 @@ fn back_to_back_files_same_sector() {
 
 #[test]
 fn signature_at_end_of_image() {
-    let size = 4096;
+    let size = 8192;
     let mut img = vec![0u8; size];
 
-    // JPEG header at the last full sector (offset 3584 = 7 * 512)
-    // Footer at offset 3800
-    let start = 3584;
+    // JPEG header at sector 10 (offset 5120)
+    // Footer at offset 6700 (distance 1580, well past the 512/1024 minimums)
+    let start = 5120;
     img[start] = 0xFF; img[start + 1] = 0xD8; img[start + 2] = 0xFF;
-    img[3800] = 0xFF; img[3801] = 0xD9;
+    img[6700] = 0xFF; img[6701] = 0xD9;
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    assert_eq!(carved.len(), 3802 - start);
+    assert_eq!(carved.len(), 6702 - start);
 }
 
 // ===========================================================================
@@ -183,11 +181,11 @@ fn gif_false_footer_frequency() {
     assert_eq!(files.len(), 1);
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    // BUG/limitation: stops at first footer (offset 12), which is almost certainly
-    // not a real GIF terminator. A real GIF has structure between header and trailer.
+    // Smart carver skips footer at offset 10 (within 64 bytes of header)
+    // and finds the next one at offset 500.
     assert_eq!(
-        carved.len(), 12,
-        "Stops at first 00 3B, which is likely a false positive"
+        carved.len(), 502,
+        "Should skip false footer at 10 and stop at the one at 500"
     );
 }
 

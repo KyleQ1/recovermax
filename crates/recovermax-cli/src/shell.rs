@@ -109,6 +109,7 @@ pub fn run_interactive(image_path: &Path) -> Result<()> {
                     "cat" => cmd_cat(&active_fs, args),
                     "hexdump" | "xxd" => cmd_hexdump(&reader, args),
                     "recover" => cmd_recover(&reader, &report, &active_fs, args),
+                    "deleted" => cmd_deleted(&active_fs, args),
                     "carve" => cmd_carve(&reader, args),
                     "scan" => cmd_scan_save(&report, args),
                     "fs" => cmd_switch_fs(&reader, &report, &mut active_fs, args),
@@ -170,6 +171,8 @@ fn print_help() {
     println!();
     println!("Recovery:");
     println!("  recover <path> -d <dest>   Recover file or directory to destination");
+    println!("  deleted                    List deleted inodes (dtime set or links=0)");
+    println!("  deleted recover <inode> -d <dest>  Recover a deleted file by inode number");
     println!("  carve -d <dest> [-t types] Raw carve files by signature");
     println!();
     println!("Inspection:");
@@ -478,6 +481,121 @@ fn cmd_recover(reader: &ImageReader, report: &ScanReport, active_fs: &Option<Act
     match recoverer.recover(report, path_filter.as_deref()) {
         Ok(()) => println!("Recovery complete. Files saved to {}", dest.display()),
         Err(e) => println!("Recovery error: {}", e),
+    }
+}
+
+fn cmd_deleted(active_fs: &Option<ActiveFs>, args: &[&str]) {
+    let fs = match active_fs {
+        Some(f) => f,
+        None => {
+            println!("No filesystem mounted. Use 'fs <index>' to select one.");
+            return;
+        }
+    };
+
+    if args.is_empty() {
+        // List all deleted inodes
+        match fs.ext4.scan_deleted_inodes() {
+            Ok(deleted) => {
+                if deleted.is_empty() {
+                    println!("No deleted inodes found.");
+                    return;
+                }
+
+                println!("Found {} deleted inodes:\n", deleted.len());
+                println!("{:>8}  {:>12}  {:>10}  {}", "INODE", "SIZE", "DTIME", "TYPE");
+                println!("{}", "-".repeat(50));
+
+                for d in &deleted {
+                    let type_str = match d.file_type {
+                        FileType::RegularFile => "file",
+                        FileType::Directory => "dir",
+                        FileType::Symlink => "symlink",
+                        FileType::Other => "other",
+                    };
+                    println!("{:>8}  {:>12}  {:>10}  {}",
+                        d.inode_num,
+                        bytesize::ByteSize(d.size),
+                        d.dtime,
+                        type_str,
+                    );
+                }
+
+                println!("\nTo recover: deleted recover <inode> -d <dest>");
+            }
+            Err(e) => println!("Error scanning deleted inodes: {}", e),
+        }
+        return;
+    }
+
+    // deleted recover <inode> -d <dest>
+    if args[0] != "recover" {
+        println!("Usage: deleted                           List deleted inodes");
+        println!("       deleted recover <inode> -d <dest> Recover a deleted file");
+        return;
+    }
+
+    if args.len() < 2 {
+        println!("Usage: deleted recover <inode> -d <dest>");
+        return;
+    }
+
+    let inode_num: u64 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("Invalid inode number: {}", args[1]);
+            return;
+        }
+    };
+
+    let mut dest: Option<std::path::PathBuf> = None;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i] {
+            "-d" | "--dest" => {
+                if i + 1 < args.len() {
+                    dest = Some(std::path::PathBuf::from(args[i + 1]));
+                    i += 2;
+                } else {
+                    println!("Missing destination after -d");
+                    return;
+                }
+            }
+            _ => { i += 1; }
+        }
+    }
+
+    let dest = match dest {
+        Some(d) => d,
+        None => {
+            println!("Usage: deleted recover <inode> -d <dest>");
+            return;
+        }
+    };
+
+    match fs.ext4.read_inode(inode_num) {
+        Ok(inode) => {
+            match fs.ext4.read_inode_data(&inode) {
+                Ok(data) => {
+                    if let Err(e) = std::fs::create_dir_all(&dest) {
+                        println!("Error creating directory: {}", e);
+                        return;
+                    }
+                    let filename = format!("inode-{}", inode_num);
+                    let dest_file = dest.join(&filename);
+                    match std::fs::write(&dest_file, &data) {
+                        Ok(()) => println!("Recovered inode {} ({}) to {}",
+                            inode_num,
+                            bytesize::ByteSize(inode.size),
+                            dest_file.display(),
+                        ),
+                        Err(e) => println!("Error writing file: {}", e),
+                    }
+                }
+                Err(e) => println!("Error reading inode data: {}", e),
+            }
+        }
+        Err(e) => println!("Error reading inode {}: {}", inode_num, e),
     }
 }
 
