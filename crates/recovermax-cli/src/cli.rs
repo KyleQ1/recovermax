@@ -1,17 +1,14 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::Scanner;
 use recovermax_core::carve;
 use recovermax_core::recover;
 
-#[derive(Parser)]
-#[command(name = "recovermax", version, about = "High-performance data recovery tool")]
 pub struct Args {
-    #[command(subcommand)]
     pub command: Command,
 }
 
@@ -169,13 +166,13 @@ pub fn run(args: Args) -> Result<()> {
                 offset.parse()?
             };
             let data = reader.read_at(off, length)?;
-            print_hexdump(data, off);
+            print_hexdump_pub(data, off);
             Ok(())
         }
     }
 }
 
-fn print_hexdump(data: &[u8], base_offset: u64) {
+pub fn print_hexdump_pub(data: &[u8], base_offset: u64) {
     for (i, chunk) in data.chunks(16).enumerate() {
         let addr = base_offset + (i * 16) as u64;
         print!("{:08x}  ", addr);
@@ -187,7 +184,6 @@ fn print_hexdump(data: &[u8], base_offset: u64) {
             }
         }
 
-        // Pad if short line
         if chunk.len() < 16 {
             for j in chunk.len()..16 {
                 print!("   ");
