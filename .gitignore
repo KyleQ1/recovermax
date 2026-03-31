@@ -1,5 +1,7 @@
 /target
 /test-images/
 website/node_modules/
+website/.next/
+website/out/
 website/dist/
 CLAUDE.md

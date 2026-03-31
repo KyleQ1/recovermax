@@ -192,7 +192,7 @@ impl<'a> Scanner<'a> {
         let partitions = self.detect_partitions()?;
         let mut filesystems = Vec::new();
 
-        // Check each partition for a known filesystem
+        // Check each partition for a known filesystem at its start
         for part in &partitions {
             if let Some(info) = self.detect_filesystem(part.offset)? {
                 filesystems.push(info);
@@ -206,11 +206,78 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        // If we haven't found any filesystems yet, do a deep scan within
+        // each partition. This handles LVM/ZFS/LUKS where the filesystem
+        // sits at an offset inside the partition, not at its start.
+        if filesystems.is_empty() {
+            for part in &partitions {
+                let found = self.deep_scan_partition(part.offset, part.size)?;
+                for info in found {
+                    if !filesystems.iter().any(|f| f.offset == info.offset) {
+                        filesystems.push(info);
+                    }
+                }
+            }
+        }
+
         Ok(ScanReport {
             image_size: self.reader.len(),
             partitions,
             filesystems,
         })
+    }
+
+    /// Scan within a partition for filesystems at MB-aligned offsets.
+    /// This finds filesystems inside LVM, ZFS, LUKS, etc.
+    fn deep_scan_partition(&self, part_offset: u64, part_size: u64) -> Result<Vec<FsInfo>> {
+        let mut found = Vec::new();
+        let step: u64 = 1024 * 1024; // 1 MiB steps
+        let end = part_offset + part_size;
+        let total_steps = part_size / step;
+        let log_interval = 10 * 1024; // Log every ~10 GiB (10240 MB steps)
+
+        tracing::info!(
+            "Deep scanning partition at offset {} ({}) for embedded filesystems...",
+            part_offset,
+            bytesize::ByteSize(part_size)
+        );
+
+        let mut offset = part_offset;
+        let mut steps_done: u64 = 0;
+        while offset < end {
+            // Don't re-check the partition start (already done above)
+            if offset != part_offset {
+                if let Some(info) = self.detect_filesystem(offset)? {
+                    tracing::info!(
+                        "Found {} filesystem \"{}\" at offset {} ({})",
+                        info.fs_type,
+                        info.label,
+                        offset,
+                        bytesize::ByteSize(offset)
+                    );
+                    found.push(info);
+                }
+            }
+
+            offset += step;
+            steps_done += 1;
+
+            if steps_done % log_interval == 0 {
+                tracing::info!(
+                    "Deep scan progress: {} / {} ({:.1}%)",
+                    bytesize::ByteSize(offset - part_offset),
+                    bytesize::ByteSize(part_size),
+                    (steps_done as f64 / total_steps as f64) * 100.0
+                );
+            }
+        }
+
+        tracing::info!(
+            "Deep scan complete: found {} filesystem(s)",
+            found.len()
+        );
+
+        Ok(found)
     }
 }
 

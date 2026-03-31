@@ -1,0 +1,114 @@
+.section {
+  padding: 96px 0;
+  text-align: center;
+}
+
+.container {
+  max-width: var(--max-w);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.label {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.heading {
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 700;
+  letter-spacing: -1px;
+  margin-bottom: 16px;
+  line-height: 1.15;
+}
+
+.subhead {
+  color: var(--text-muted);
+  font-size: 17px;
+  max-width: 640px;
+  line-height: 1.6;
+  margin: 0 auto 56px;
+}
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 32px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.step {
+  position: relative;
+  text-align: center;
+  padding: 0 16px;
+}
+
+.stepNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 20px;
+  transition: all 0.25s;
+}
+.step:hover .stepNumber {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.step h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.step p {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.stepCmd {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--green);
+}
+
+/* Step connectors — desktop only */
+@media (min-width: 768px) {
+  .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    top: 24px;
+    right: -16px;
+    width: 32px;
+    height: 2px;
+    background: var(--border);
+  }
+}
+
+@media (max-width: 640px) {
+  .section { padding: 64px 0; }
+  .steps { grid-template-columns: 1fr; gap: 40px; }
+  .step:not(:last-child)::after { display: none; }
+}
