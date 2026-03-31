@@ -141,7 +141,57 @@ impl<'a> Recoverer<'a> {
                     }
                 }
 
-                _ => {}
+                FileType::Symlink => {
+                    if entry.inode > 0 {
+                        let dest_file = self.dest.join(&entry_path);
+                        if let Some(parent) = dest_file.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+
+                        match ext4.read_inode(entry.inode) {
+                            Ok(inode) => {
+                                // Short symlinks (< 60 bytes) store target inline in block_data.
+                                // Longer ones store it in data blocks like regular files.
+                                let target = if inode.size < 60 && !inode.uses_extents() {
+                                    let len = inode.size as usize;
+                                    String::from_utf8_lossy(&inode.block_data[..len]).to_string()
+                                } else {
+                                    match ext4.read_inode_data(&inode) {
+                                        Ok(data) => String::from_utf8_lossy(&data).to_string(),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to read symlink target for {}: {}",
+                                                entry_path.display(), e
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                };
+
+                                // Try to create a real symlink; fall back to a text file
+                                #[cfg(unix)]
+                                {
+                                    if std::os::unix::fs::symlink(&target, &dest_file).is_err() {
+                                        let _ = std::fs::write(&dest_file, &target);
+                                    }
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    let _ = std::fs::write(&dest_file, &target);
+                                }
+                                pb.inc(1);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read symlink inode {} for {}: {}",
+                                    entry.inode, entry_path.display(), e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                FileType::Other => {}
             }
         }
 

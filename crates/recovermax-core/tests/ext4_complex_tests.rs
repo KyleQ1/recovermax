@@ -337,26 +337,39 @@ fn read_file_spanning_multiple_direct_blocks() {
 }
 
 // ===========================================================================
-// BUG: File needing >12 direct blocks (indirect blocks not implemented)
+// Indirect blocks: 12 direct + 3 via indirect pointer block
 // ===========================================================================
 
 #[test]
-fn blockmap_file_exceeding_12_direct_blocks_truncates() {
-    // Current implementation only handles 12 direct blocks.
-    // A file needing 13+ blocks should still return SOMETHING, not crash.
-    let mut builder = Ext4ImageBuilder::new(128);
+fn blockmap_file_with_indirect_blocks() {
+    let mut builder = Ext4ImageBuilder::new(256);
     builder.write_superblock("indirect");
     builder.write_block_group_descriptor(0, 3);
 
-    // 13 blocks — block 12 (index 12) is the indirect pointer, not a data block
-    // The current code will read blocks[12] as data which is wrong, but shouldn't crash.
-    let total_size = 13 * 4096;
-    let blocks: Vec<u32> = (20..35).collect(); // 15 entries to fill direct + indirect slots
+    // 15 blocks total: 12 direct + 3 via indirect
+    let total_size = 15 * 4096;
+    let mut blocks = [0u32; 15];
+    for i in 0..12 {
+        blocks[i] = 20 + i as u32; // direct: blocks 20-31
+    }
+    blocks[12] = 50; // indirect pointer block at block 50
+
     builder.write_inode_with_blockmap(11, 0x8000, total_size as u64, &blocks);
 
-    for b in 20..35 {
-        builder.write_data(b, &vec![(b - 20) as u8; 4096]);
+    // Write direct block data
+    for i in 0..12u32 {
+        builder.write_data((20 + i) as u64, &vec![i as u8; 4096]);
     }
+
+    // Write indirect pointer block (block 50 contains pointers to 60, 61, 62)
+    let ind_off = 50 * 4096;
+    builder.write_u32(ind_off, 60);
+    builder.write_u32(ind_off + 4, 61);
+    builder.write_u32(ind_off + 8, 62);
+
+    builder.write_data(60, &vec![0xDD; 4096]);
+    builder.write_data(61, &vec![0xEE; 4096]);
+    builder.write_data(62, &vec![0xFF; 4096]);
 
     let img = builder.build();
     let f = create_test_image(&img);
@@ -366,13 +379,11 @@ fn blockmap_file_exceeding_12_direct_blocks_truncates() {
     let inode = fs.read_inode(11).unwrap();
     let data = fs.read_inode_data(&inode).unwrap();
 
-    // BUG: should be 13*4096 bytes but we only get 12*4096 since indirect not implemented
-    // This test documents the known limitation
-    assert!(
-        data.len() < total_size,
-        "Expected truncated output since indirect blocks aren't implemented, got full {}",
-        data.len()
-    );
+    assert_eq!(data.len(), total_size);
+    // Check indirect blocks
+    assert!(data[12 * 4096..13 * 4096].iter().all(|&b| b == 0xDD));
+    assert!(data[13 * 4096..14 * 4096].iter().all(|&b| b == 0xEE));
+    assert!(data[14 * 4096..15 * 4096].iter().all(|&b| b == 0xFF));
 }
 
 // ===========================================================================

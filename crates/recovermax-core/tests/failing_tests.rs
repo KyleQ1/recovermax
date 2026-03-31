@@ -126,27 +126,44 @@ impl Ext4ImageBuilder {
 }
 
 // ===========================================================================
-// BUG 1: Indirect block reading is not implemented.
-// A file with 13+ blocks using block maps will silently lose data.
-// This test verifies it returns the CORRECT amount of data (it won't).
+// FIXED: Indirect block reading.
+// blocks[0..12] = direct, blocks[12] = pointer to a block of block pointers.
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "indirect blocks should return full data")]
-fn bug_indirect_blocks_not_implemented() {
-    let mut builder = Ext4ImageBuilder::new(128);
-    builder.write_superblock("indirect-bug");
+fn indirect_blocks_work() {
+    let mut builder = Ext4ImageBuilder::new(256);
+    builder.write_superblock("indirect-fix");
     builder.write_block_group_descriptor(0, 3);
 
-    // 13 blocks of data via block map
-    // blocks[0..11] = direct, blocks[12] = indirect pointer (should point to block of pointers)
-    let file_size = 13 * 4096;
-    let blocks: Vec<u32> = (20..33).collect();
+    // 14 blocks of actual data: 12 direct + 2 via indirect
+    // Direct blocks: 20..32 (12 blocks)
+    // Indirect pointer block: 32 (contains pointers to blocks 40, 41)
+    // Data blocks via indirect: 40, 41
+    let file_size = 14 * 4096;
+    // inode block_data: entries 0-11 = direct blocks, entry 12 = indirect block
+    let mut blocks = [0u32; 15];
+    for i in 0..12 {
+        blocks[i] = 20 + i as u32;
+    }
+    blocks[12] = 35; // indirect pointer block
+
     builder.write_inode_with_blockmap(11, 0x8000, file_size as u64, &blocks);
 
-    for (i, b) in (20u32..33).enumerate() {
-        builder.write_data(b as u64, &vec![i as u8; 4096]);
+    // Write direct block data
+    for i in 0..12u32 {
+        builder.write_data((20 + i) as u64, &vec![i as u8; 4096]);
     }
+
+    // Write the indirect pointer block at block 35
+    // It contains u32 pointers to data blocks 40, 41
+    let ind_off = 35 * 4096;
+    builder.write_u32(ind_off, 40);
+    builder.write_u32(ind_off + 4, 41);
+
+    // Write the data blocks pointed to by indirect
+    builder.write_data(40, &vec![0xAA; 4096]);
+    builder.write_data(41, &vec![0xBB; 4096]);
 
     let img = builder.build();
     let f = create_test_image(&img);
@@ -156,28 +173,29 @@ fn bug_indirect_blocks_not_implemented() {
     let inode = fs.read_inode(11).unwrap();
     let data = fs.read_inode_data(&inode).unwrap();
 
-    assert!(
-        data.len() == file_size,
-        "indirect blocks should return full data, got {} instead of {}",
-        data.len(), file_size
-    );
+    assert_eq!(data.len(), file_size);
+    // Verify direct blocks
+    for i in 0..12 {
+        assert!(
+            data[i * 4096..(i + 1) * 4096].iter().all(|&b| b == i as u8),
+            "Direct block {} wrong", i
+        );
+    }
+    // Verify indirect blocks
+    assert!(data[12 * 4096..13 * 4096].iter().all(|&b| b == 0xAA), "Indirect block 0 wrong");
+    assert!(data[13 * 4096..14 * 4096].iter().all(|&b| b == 0xBB), "Indirect block 1 wrong");
 }
 
 // ===========================================================================
-// BUG 2: Block map stops at first zero block, but a sparse file can have
-// block 0 (hole) followed by real blocks. The current implementation
-// stops reading at the first zero, losing the rest of the file.
+// FIXED: Sparse files — holes (block 0) emit zeros instead of stopping.
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "sparse file should preserve holes")]
-fn bug_sparse_file_with_holes() {
+fn sparse_file_with_holes() {
     let mut builder = Ext4ImageBuilder::new(128);
-    builder.write_superblock("sparse-bug");
+    builder.write_superblock("sparse-fix");
     builder.write_block_group_descriptor(0, 3);
 
-    // Sparse file: block 0 is a hole (zero), blocks 1 and 2 have data
-    // blocks = [0, 25, 26] — first entry is 0 meaning "hole"
     let file_size = 3 * 4096;
     builder.write_inode_with_blockmap(11, 0x8000, file_size as u64, &[0, 25, 26]);
 
@@ -192,22 +210,21 @@ fn bug_sparse_file_with_holes() {
     let inode = fs.read_inode(11).unwrap();
     let data = fs.read_inode_data(&inode).unwrap();
 
-    // Current bug: stops at first zero block, returns 0 bytes
-    assert!(
-        data.len() == file_size,
-        "sparse file should preserve holes, got {} instead of {}",
-        data.len(), file_size
-    );
+    assert_eq!(data.len(), file_size);
+    // First block is a hole — should be all zeros
+    assert!(data[0..4096].iter().all(|&b| b == 0), "Hole should be zeros");
+    // Second block has data
+    assert!(data[4096..8192].iter().all(|&b| b == 0xAA), "Block 2 wrong");
+    // Third block has data
+    assert!(data[8192..12288].iter().all(|&b| b == 0xBB), "Block 3 wrong");
 }
 
 // ===========================================================================
-// BUG 3: Recovery doesn't recover symlinks at all.
-// Symlinks are silently skipped by the recoverer.
+// FIXED: Symlink recovery — inline symlinks recovered as symlinks or text files.
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "symlink should be recovered")]
-fn bug_symlink_recovery_missing() {
+fn symlink_recovery() {
     let mut builder = Ext4ImageBuilder::new(128);
     builder.write_superblock("symlink-bug");
     builder.write_block_group_descriptor(0, 3);

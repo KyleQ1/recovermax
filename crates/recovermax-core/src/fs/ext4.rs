@@ -301,29 +301,113 @@ impl<'a> Ext4Fs<'a> {
     }
 
     fn read_block_map_data(&self, inode: &Inode) -> Result<Vec<u8>> {
-        let mut result = Vec::with_capacity(inode.size as usize);
-        // Direct blocks (0-11)
+        let target_size = inode.size as usize;
+        let bs = self.superblock.block_size() as usize;
+        let mut result = Vec::with_capacity(target_size.min(bs * 12));
+
+        // Direct blocks (entries 0-11)
         for i in 0..12 {
+            if result.len() >= target_size {
+                break;
+            }
             let block = u32::from_le_bytes(
                 inode.block_data[i * 4..(i + 1) * 4].try_into()?
             ) as u64;
+            self.append_block_or_hole(&mut result, block)?;
+        }
 
-            if block == 0 {
-                break;
-            }
-
-            let data = self.read_block(block)?;
-            result.extend_from_slice(data);
-
-            if result.len() >= inode.size as usize {
-                break;
+        // Indirect block (entry 12)
+        if result.len() < target_size {
+            let indirect_block = u32::from_le_bytes(
+                inode.block_data[48..52].try_into()?
+            ) as u64;
+            if indirect_block != 0 {
+                self.read_indirect(&mut result, indirect_block, target_size)?;
             }
         }
 
-        // TODO: indirect, double-indirect, triple-indirect blocks
+        // Double-indirect block (entry 13)
+        if result.len() < target_size {
+            let dind_block = u32::from_le_bytes(
+                inode.block_data[52..56].try_into()?
+            ) as u64;
+            if dind_block != 0 {
+                self.read_double_indirect(&mut result, dind_block, target_size)?;
+            }
+        }
 
-        result.truncate(inode.size as usize);
+        // Triple-indirect block (entry 14)
+        if result.len() < target_size {
+            let tind_block = u32::from_le_bytes(
+                inode.block_data[56..60].try_into()?
+            ) as u64;
+            if tind_block != 0 {
+                self.read_triple_indirect(&mut result, tind_block, target_size)?;
+            }
+        }
+
+        result.truncate(target_size);
         Ok(result)
+    }
+
+    /// Append one block of data, or a block-sized hole if block == 0 (sparse file).
+    fn append_block_or_hole(&self, result: &mut Vec<u8>, block: u64) -> Result<()> {
+        if block == 0 {
+            result.extend(std::iter::repeat(0u8).take(self.superblock.block_size() as usize));
+        } else {
+            let data = self.read_block(block)?;
+            result.extend_from_slice(data);
+        }
+        Ok(())
+    }
+
+    /// Read block pointers from an indirect block and append data.
+    fn read_indirect(&self, result: &mut Vec<u8>, indirect_block: u64, target_size: usize) -> Result<()> {
+        let ptrs = self.read_block(indirect_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if result.len() >= target_size {
+                break;
+            }
+            let block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            self.append_block_or_hole(result, block)?;
+        }
+        Ok(())
+    }
+
+    /// Read from a double-indirect block.
+    fn read_double_indirect(&self, result: &mut Vec<u8>, dind_block: u64, target_size: usize) -> Result<()> {
+        let ptrs = self.read_block(dind_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if result.len() >= target_size {
+                break;
+            }
+            let ind_block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            if ind_block != 0 {
+                self.read_indirect(result, ind_block, target_size)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read from a triple-indirect block.
+    fn read_triple_indirect(&self, result: &mut Vec<u8>, tind_block: u64, target_size: usize) -> Result<()> {
+        let ptrs = self.read_block(tind_block)?;
+        let ptrs_per_block = self.superblock.block_size() as usize / 4;
+
+        for i in 0..ptrs_per_block {
+            if result.len() >= target_size {
+                break;
+            }
+            let dind_block = u32::from_le_bytes(ptrs[i * 4..(i + 1) * 4].try_into()?) as u64;
+            if dind_block != 0 {
+                self.read_double_indirect(result, dind_block, target_size)?;
+            }
+        }
+        Ok(())
     }
 }
 
