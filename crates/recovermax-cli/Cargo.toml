@@ -1,0 +1,19 @@
+[package]
+name = "recovermax"
+description = "High-performance data recovery CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "recovermax"
+path = "src/main.rs"
+
+[dependencies]
+recovermax-core = { path = "../recovermax-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+bytesize = "2"
