@@ -6,6 +6,7 @@ use rustyline::DefaultEditor;
 
 use recovermax_core::carve::Carver;
 use recovermax_core::fs::ext4::Ext4Fs;
+use recovermax_core::fs::ntfs::NtfsFs;
 use recovermax_core::fs::{DirEntry, FileType};
 use recovermax_core::io::ImageReader;
 use recovermax_core::recover::Recoverer;
@@ -53,23 +54,43 @@ pub fn run_interactive(image_path: &Path) -> Result<()> {
     }
     println!();
 
-    // Try to open the first ext4 filesystem
+    // Try to mount the first known filesystem (ext4 or NTFS)
     let mut active_fs: Option<ActiveFs> = None;
-    if let Some(fs_info) = report.filesystems.iter().find(|f| f.fs_type == "ext4") {
-        match Ext4Fs::new(&reader, fs_info.offset) {
-            Ok(ext4) => {
-                active_fs = Some(ActiveFs {
-                    ext4,
-                    cwd: PathBuf::from("/"),
-                    cwd_inode: 2,
-                    offset: fs_info.offset,
-                    label: fs_info.label.clone(),
-                });
-                println!("Mounted ext4 \"{}\" at /", fs_info.label);
+    for fs_info in &report.filesystems {
+        match fs_info.fs_type.as_str() {
+            "ext4" => {
+                match Ext4Fs::new(&reader, fs_info.offset) {
+                    Ok(ext4) => {
+                        active_fs = Some(ActiveFs {
+                            kind: FsKind::Ext4(ext4),
+                            cwd: PathBuf::from("/"),
+                            cwd_inode: 2,
+                            offset: fs_info.offset,
+                            label: fs_info.label.clone(),
+                        });
+                        println!("Mounted ext4 \"{}\" at /", fs_info.label);
+                        break;
+                    }
+                    Err(e) => println!("Warning: could not mount ext4: {}", e),
+                }
             }
-            Err(e) => {
-                println!("Warning: could not mount ext4: {}", e);
+            "ntfs" => {
+                match NtfsFs::new(&reader, fs_info.offset) {
+                    Ok(ntfs) => {
+                        active_fs = Some(ActiveFs {
+                            kind: FsKind::Ntfs(ntfs),
+                            cwd: PathBuf::from("/"),
+                            cwd_inode: NtfsFs::ROOT_ENTRY,
+                            offset: fs_info.offset,
+                            label: fs_info.label.clone(),
+                        });
+                        println!("Mounted ntfs at /");
+                        break;
+                    }
+                    Err(e) => println!("Warning: could not mount ntfs: {}", e),
+                }
             }
+            _ => {}
         }
     }
 
@@ -141,13 +162,65 @@ pub fn run_interactive(image_path: &Path) -> Result<()> {
     Ok(())
 }
 
+enum FsKind<'a> {
+    Ext4(Ext4Fs<'a>),
+    Ntfs(NtfsFs<'a>),
+}
+
 struct ActiveFs<'a> {
-    ext4: Ext4Fs<'a>,
+    kind: FsKind<'a>,
     cwd: PathBuf,
     cwd_inode: u64,
     offset: u64,
     #[allow(dead_code)]
     label: String,
+}
+
+impl<'a> ActiveFs<'a> {
+    fn list_directory(&self, inode: u64) -> Result<Vec<DirEntry>> {
+        match &self.kind {
+            FsKind::Ext4(ext4) => ext4.list_directory(inode),
+            FsKind::Ntfs(ntfs) => ntfs.list_directory(inode),
+        }
+    }
+
+    fn is_directory(&self, inode: u64) -> Result<bool> {
+        match &self.kind {
+            FsKind::Ext4(ext4) => ext4.read_inode(inode).map(|i| i.is_directory()),
+            FsKind::Ntfs(ntfs) => ntfs.read_mft_entry(inode).map(|e| e.is_directory()),
+        }
+    }
+
+    fn file_size(&self, inode: u64) -> Result<u64> {
+        match &self.kind {
+            FsKind::Ext4(ext4) => ext4.read_inode(inode).map(|i| i.size),
+            FsKind::Ntfs(ntfs) => ntfs.read_mft_entry(inode).map(|e| e.file_size),
+        }
+    }
+
+    fn read_file_data(&self, inode: u64) -> Result<Vec<u8>> {
+        match &self.kind {
+            FsKind::Ext4(ext4) => {
+                let inode_data = ext4.read_inode(inode)?;
+                ext4.read_inode_data(&inode_data)
+            }
+            FsKind::Ntfs(ntfs) => ntfs.read_file(inode),
+        }
+    }
+
+    fn is_regular_file(&self, inode: u64) -> Result<bool> {
+        match &self.kind {
+            FsKind::Ext4(ext4) => ext4.read_inode(inode).map(|i| i.is_regular_file()),
+            FsKind::Ntfs(ntfs) => ntfs.read_mft_entry(inode).map(|e| !e.is_directory()),
+        }
+    }
+
+    fn root_inode(&self) -> u64 {
+        match &self.kind {
+            FsKind::Ext4(_) => 2,
+            FsKind::Ntfs(_) => NtfsFs::ROOT_ENTRY,
+        }
+    }
 }
 
 fn dirs_path() -> PathBuf {
@@ -212,7 +285,7 @@ fn cmd_ls(active_fs: &Option<ActiveFs>, args: &[&str]) {
         }
     };
 
-    match fs.ext4.list_directory(target_inode) {
+    match fs.list_directory(target_inode) {
         Ok(entries) => {
             let mut sorted: Vec<&DirEntry> = entries.iter().collect();
             sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -233,10 +306,9 @@ fn cmd_ls(active_fs: &Option<ActiveFs>, args: &[&str]) {
 
                 let del_marker = if entry.deleted { " [DELETED]" } else { "" };
 
-                // Try to get size from inode
                 let size_str = if entry.inode > 0 && !entry.deleted {
-                    match fs.ext4.read_inode(entry.inode) {
-                        Ok(inode) => format!("{:>10}", bytesize::ByteSize(inode.size)),
+                    match fs.file_size(entry.inode) {
+                        Ok(size) => format!("{:>10}", bytesize::ByteSize(size)),
                         Err(_) => format!("{:>10}", "?"),
                     }
                 } else {
@@ -265,23 +337,19 @@ fn cmd_cd(active_fs: &mut Option<ActiveFs>, args: &[&str]) {
 
     if args.is_empty() {
         fs.cwd = PathBuf::from("/");
-        fs.cwd_inode = 2;
+        fs.cwd_inode = fs.root_inode();
         return;
     }
 
     let target = args[0];
     match resolve_path(fs, target) {
         Ok((inode, path)) => {
-            // Verify it's a directory
-            match fs.ext4.read_inode(inode) {
-                Ok(inode_data) => {
-                    if inode_data.is_directory() {
-                        fs.cwd_inode = inode;
-                        fs.cwd = path;
-                    } else {
-                        println!("Not a directory: {}", target);
-                    }
+            match fs.is_directory(inode) {
+                Ok(true) => {
+                    fs.cwd_inode = inode;
+                    fs.cwd = path;
                 }
+                Ok(false) => println!("Not a directory: {}", target),
                 Err(e) => println!("Error reading inode: {}", e),
             }
         }
@@ -314,15 +382,15 @@ fn cmd_tree(active_fs: &Option<ActiveFs>, args: &[&str]) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
 
-    print_tree(&fs.ext4, inode, "", max_depth, 0);
+    print_tree(fs, inode, "", max_depth, 0);
 }
 
-fn print_tree(ext4: &Ext4Fs, inode: u64, prefix: &str, max_depth: usize, depth: usize) {
+fn print_tree(fs: &ActiveFs, inode: u64, prefix: &str, max_depth: usize, depth: usize) {
     if depth > max_depth {
         return;
     }
 
-    let entries = match ext4.list_directory(inode) {
+    let entries = match fs.list_directory(inode) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -345,7 +413,7 @@ fn print_tree(ext4: &Ext4Fs, inode: u64, prefix: &str, max_depth: usize, depth: 
             } else {
                 format!("{}│   ", prefix)
             };
-            print_tree(ext4, entry.inode, &child_prefix, max_depth, depth + 1);
+            print_tree(fs, entry.inode, &child_prefix, max_depth, depth + 1);
         }
     }
 }
@@ -366,34 +434,36 @@ fn cmd_cat(active_fs: &Option<ActiveFs>, args: &[&str]) {
 
     match resolve_path(fs, args[0]) {
         Ok((inode, _)) => {
-            match fs.ext4.read_inode(inode) {
-                Ok(inode_data) => {
-                    if !inode_data.is_regular_file() {
-                        println!("Not a regular file.");
-                        return;
-                    }
-                    if inode_data.size > 1024 * 1024 {
-                        println!(
-                            "File is {} — too large for cat. Use 'recover' instead.",
-                            bytesize::ByteSize(inode_data.size)
-                        );
-                        return;
-                    }
-                    match fs.ext4.read_inode_data(&inode_data) {
-                        Ok(data) => {
-                            match String::from_utf8(data) {
-                                Ok(text) => print!("{}", text),
-                                Err(e) => {
-                                    println!("(binary file, {} bytes — showing as hex)", e.as_bytes().len());
-                                    let data = e.into_bytes();
-                                    super::cli::print_hexdump_pub(&data, 0);
-                                }
-                            }
+            match fs.is_regular_file(inode) {
+                Ok(false) => {
+                    println!("Not a regular file.");
+                    return;
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    return;
+                }
+                _ => {}
+            }
+            match fs.file_size(inode) {
+                Ok(size) if size > 1024 * 1024 => {
+                    println!("File is {} — too large for cat. Use 'recover' instead.", bytesize::ByteSize(size));
+                    return;
+                }
+                _ => {}
+            }
+            match fs.read_file_data(inode) {
+                Ok(data) => {
+                    match String::from_utf8(data) {
+                        Ok(text) => print!("{}", text),
+                        Err(e) => {
+                            println!("(binary file, {} bytes — showing as hex)", e.as_bytes().len());
+                            let data = e.into_bytes();
+                            super::cli::print_hexdump_pub(&data, 0);
                         }
-                        Err(e) => println!("Error reading file: {}", e),
                     }
                 }
-                Err(e) => println!("Error: {}", e),
+                Err(e) => println!("Error reading file: {}", e),
             }
         }
         Err(e) => println!("Error: {}", e),
@@ -493,9 +563,18 @@ fn cmd_deleted(active_fs: &Option<ActiveFs>, args: &[&str]) {
         }
     };
 
+    let ext4 = match &fs.kind {
+        FsKind::Ext4(ext4) => ext4,
+        FsKind::Ntfs(_) => {
+            println!("Deleted inode scanning is not supported for NTFS.");
+            println!("NTFS marks deleted entries in the MFT — use 'ls' to browse.");
+            return;
+        }
+    };
+
     if args.is_empty() {
         // List all deleted inodes
-        match fs.ext4.scan_deleted_inodes() {
+        match ext4.scan_deleted_inodes() {
             Ok(deleted) => {
                 if deleted.is_empty() {
                     println!("No deleted inodes found.");
@@ -573,9 +652,9 @@ fn cmd_deleted(active_fs: &Option<ActiveFs>, args: &[&str]) {
         }
     };
 
-    match fs.ext4.read_inode(inode_num) {
+    match ext4.read_inode(inode_num) {
         Ok(inode) => {
-            match fs.ext4.read_inode_data(&inode) {
+            match ext4.read_inode_data(&inode) {
                 Ok(data) => {
                     if let Err(e) = std::fs::create_dir_all(&dest) {
                         println!("Error creating directory: {}", e);
@@ -718,30 +797,46 @@ fn cmd_switch_fs<'a>(
     }
 
     let fs_info = &report.filesystems[idx];
-    if fs_info.fs_type != "ext4" {
-        println!("Unsupported filesystem type: {}", fs_info.fs_type);
-        return;
-    }
-
-    match Ext4Fs::new(reader, fs_info.offset) {
-        Ok(ext4) => {
-            *active_fs = Some(ActiveFs {
-                ext4,
-                cwd: PathBuf::from("/"),
-                cwd_inode: 2,
-                offset: fs_info.offset,
-                label: fs_info.label.clone(),
-            });
-            println!("Switched to ext4 \"{}\"", fs_info.label);
+    match fs_info.fs_type.as_str() {
+        "ext4" => {
+            match Ext4Fs::new(reader, fs_info.offset) {
+                Ok(ext4) => {
+                    *active_fs = Some(ActiveFs {
+                        kind: FsKind::Ext4(ext4),
+                        cwd: PathBuf::from("/"),
+                        cwd_inode: 2,
+                        offset: fs_info.offset,
+                        label: fs_info.label.clone(),
+                    });
+                    println!("Switched to ext4 \"{}\"", fs_info.label);
+                }
+                Err(e) => println!("Error mounting filesystem: {}", e),
+            }
         }
-        Err(e) => println!("Error mounting filesystem: {}", e),
+        "ntfs" => {
+            match NtfsFs::new(reader, fs_info.offset) {
+                Ok(ntfs) => {
+                    *active_fs = Some(ActiveFs {
+                        kind: FsKind::Ntfs(ntfs),
+                        cwd: PathBuf::from("/"),
+                        cwd_inode: NtfsFs::ROOT_ENTRY,
+                        offset: fs_info.offset,
+                        label: fs_info.label.clone(),
+                    });
+                    println!("Switched to ntfs");
+                }
+                Err(e) => println!("Error mounting filesystem: {}", e),
+            }
+        }
+        other => println!("Unsupported filesystem type: {}", other),
     }
 }
 
 /// Resolve a path string (absolute or relative to cwd) to an inode number.
 fn resolve_path(fs: &ActiveFs, path: &str) -> Result<(u64, PathBuf)> {
+    let root_inode = fs.root_inode();
     let (mut current_inode, mut current_path) = if path.starts_with('/') {
-        (2u64, PathBuf::from("/"))
+        (root_inode, PathBuf::from("/"))
     } else {
         (fs.cwd_inode, fs.cwd.clone())
     };
@@ -756,7 +851,7 @@ fn resolve_path(fs: &ActiveFs, path: &str) -> Result<(u64, PathBuf)> {
             continue;
         }
 
-        let entries = fs.ext4.list_directory(current_inode)
+        let entries = fs.list_directory(current_inode)
             .with_context(|| format!("Failed to read directory at {}", current_path.display()))?;
 
         if *component == ".." {

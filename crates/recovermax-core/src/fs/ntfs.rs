@@ -418,15 +418,43 @@ impl<'a> NtfsFs<'a> {
         parse_mft_entry(data, entry_number)
     }
 
-    /// List files by scanning MFT entries (flat scan, no directory tree)
-    pub fn list_root(&self) -> Result<Vec<DirEntry>> {
+    /// NTFS root directory is always MFT entry 5
+    pub const ROOT_ENTRY: u64 = 5;
+
+    /// List files in a directory by scanning MFT entries whose parent matches dir_entry
+    pub fn list_directory(&self, dir_entry: u64) -> Result<Vec<DirEntry>> {
         let entry_size = self.boot_sector.mft_entry_size() as u64;
         let mft_offset = self.cluster_offset(self.boot_sector.mft_cluster);
         let mut entries = Vec::new();
 
-        // Scan MFT entries. We don't know how many there are without reading
-        // $MFT's data attribute, so scan until we hit invalid entries or EOF.
-        let max_entries = 4096; // reasonable cap for initial scan
+        // Add . and .. entries
+        entries.push(DirEntry {
+            inode: dir_entry,
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            deleted: false,
+        });
+
+        // For root, parent is self
+        let parent = if dir_entry == Self::ROOT_ENTRY {
+            Self::ROOT_ENTRY
+        } else {
+            match self.read_mft_entry(dir_entry) {
+                Ok(e) => e.parent_entry,
+                Err(_) => Self::ROOT_ENTRY,
+            }
+        };
+        entries.push(DirEntry {
+            inode: parent,
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            deleted: false,
+        });
+
+        // Scan MFT entries whose parent_entry matches dir_entry
+        let max_entries = 4096;
         for i in 0..max_entries {
             let offset = mft_offset + i * entry_size;
             let data = match self.reader.read_at(offset, entry_size as usize) {
@@ -435,7 +463,7 @@ impl<'a> NtfsFs<'a> {
             };
 
             if data.len() < MFT_ENTRY_SIZE || &data[0..4] != MFT_ENTRY_MAGIC {
-                continue; // skip entries without FILE magic (unused or corrupt)
+                continue;
             }
 
             let entry = match parse_mft_entry(data, i) {
@@ -443,7 +471,7 @@ impl<'a> NtfsFs<'a> {
                 Err(_) => continue,
             };
 
-            if !entry.is_in_use() {
+            if !entry.is_in_use() || entry.parent_entry != dir_entry {
                 continue;
             }
 
@@ -452,8 +480,8 @@ impl<'a> NtfsFs<'a> {
                 None => continue,
             };
 
-            // Skip NTFS metafiles ($MFT, $MFTMirr, etc.)
-            if name.starts_with('$') {
+            // Skip NTFS metafiles and DOS-only names
+            if name.starts_with('$') || entry.filename_namespace == 2 {
                 continue;
             }
 
@@ -467,6 +495,11 @@ impl<'a> NtfsFs<'a> {
         }
 
         Ok(entries)
+    }
+
+    /// List files in root directory
+    pub fn list_root(&self) -> Result<Vec<DirEntry>> {
+        self.list_directory(Self::ROOT_ENTRY)
     }
 
     /// Read file data for a given MFT entry number

@@ -1,91 +1,51 @@
-.features {
-  padding: 96px 0;
-  background: var(--bg-raised);
-  border-top: 1px solid var(--border);
+.section {
+  padding: 48px 0;
   border-bottom: 1px solid var(--border);
 }
 
 .container {
   max-width: var(--max-w);
   margin: 0 auto;
-  padding: 0 24px;
-}
-
-.label {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  color: var(--accent);
-  margin-bottom: 12px;
+  padding: 0 20px;
 }
 
 .heading {
-  font-size: clamp(28px, 4vw, 40px);
+  font-size: 18px;
   font-weight: 700;
-  letter-spacing: -1px;
-  margin-bottom: 16px;
-  line-height: 1.15;
-}
-
-.subhead {
-  color: var(--text-muted);
-  font-size: 17px;
-  max-width: 640px;
-  line-height: 1.6;
-  margin-bottom: 56px;
+  margin-bottom: 20px;
+  letter-spacing: -0.5px;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 20px;
-}
-
-.card {
-  background: var(--bg);
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: var(--border);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 32px 28px;
-  transition: all 0.25s;
-}
-.card:hover {
-  border-color: var(--border-hl);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  overflow: hidden;
 }
 
-.icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 20px;
-  font-size: 20px;
+.item {
+  background: var(--bg);
+  padding: 16px 18px;
 }
 
-.iconFs    { background: rgba(88, 166, 255, 0.12); color: var(--accent); }
-.iconCarve { background: rgba(210, 153, 34, 0.12); color: var(--yellow); }
-.iconShell { background: rgba(188, 140, 255, 0.12); color: var(--purple); }
-.iconSpeed { background: rgba(63, 185, 80, 0.12); color: var(--green); }
-
-.card h3 {
-  font-size: 17px;
+.item h3 {
+  font-family: var(--mono);
+  font-size: 13px;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
+  color: var(--accent);
 }
 
-.card p {
+.item p {
+  font-size: 12px;
   color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 @media (max-width: 640px) {
-  .features { padding: 64px 0; }
   .grid { grid-template-columns: 1fr; }
+  .section { padding: 32px 0; }
 }

@@ -6,7 +6,7 @@ use clap::Subcommand;
 use recovermax_core::fs::ext4::Ext4Fs;
 use recovermax_core::fs::FileType;
 use recovermax_core::io::ImageReader;
-use recovermax_core::scan::Scanner;
+use recovermax_core::scan::{Scanner, ScanOptions};
 use recovermax_core::carve;
 use recovermax_core::recover;
 
@@ -30,6 +30,10 @@ pub enum Command {
         /// Output scan results to file (JSON)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Deep scan within partitions at 1 MiB steps (slow for large images)
+        #[arg(long)]
+        deep_scan: bool,
     },
 
     /// Recover files from a disk image
@@ -132,10 +136,11 @@ pub fn run(args: Args) -> Result<()> {
             Ok(())
         }
 
-        Command::Scan { image, output } => {
+        Command::Scan { image, output, deep_scan } => {
             let reader = ImageReader::open(&image)?;
             let scanner = Scanner::new(&reader);
-            let report = scanner.full_scan()?;
+            let options = ScanOptions { deep_scan };
+            let report = scanner.full_scan_with_options(&options)?;
 
             println!("{}", report.summary());
 

@@ -3,3 +3,4 @@ pub mod io;
 pub mod carve;
 pub mod scan;
 pub mod recover;
+pub mod forensic;

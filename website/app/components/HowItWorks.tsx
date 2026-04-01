@@ -1,47 +1,51 @@
 import styles from "./HowItWorks.module.css";
 
+const rows = [
+  { feature: "License", recovermax: "AGPL-3.0", photorec: "GPL-2.0", rlinux: "Proprietary", sleuthkit: "Apache 2.0" },
+  { feature: "Language", recovermax: "Rust", photorec: "C", rlinux: "C++", sleuthkit: "C / Java" },
+  { feature: "Interactive Shell", recovermax: "Yes", photorec: "No", rlinux: "No", sleuthkit: "Limited" },
+  { feature: "ext4 Recovery", recovermax: "Yes", photorec: "Carving only", rlinux: "Yes", sleuthkit: "Yes" },
+  { feature: "NTFS Recovery", recovermax: "Yes", photorec: "Carving only", rlinux: "No", sleuthkit: "Yes" },
+  { feature: "File Carving", recovermax: "8 signatures", photorec: "400+", rlinux: "No", sleuthkit: "No" },
+  { feature: "Deleted Scanning", recovermax: "Yes", photorec: "No", rlinux: "Yes", sleuthkit: "Yes" },
+  { feature: "Multi-TB Streaming", recovermax: "Yes", photorec: "Yes", rlinux: "Yes", sleuthkit: "Yes" },
+  { feature: "Forensic Reports", recovermax: "Yes", photorec: "No", rlinux: "No", sleuthkit: "Partial" },
+  { feature: "Cross-Platform", recovermax: "Yes", photorec: "Yes", rlinux: "Linux only", sleuthkit: "Yes" },
+  { feature: "Maintained (2026)", recovermax: "Active", photorec: "Slow", rlinux: "Slow", sleuthkit: "Active" },
+];
+
 export default function HowItWorks() {
   return (
-    <section className={styles.section} id="how-it-works">
+    <section className={styles.section} id="comparison">
       <div className={styles.container}>
-        <span className={styles.label}>How It Works</span>
-        <h2 className={styles.heading}>Three steps to recovered data</h2>
+        <h2 className={styles.heading}>Comparison</h2>
         <p className={styles.subhead}>
-          No complicated setup. No GUIs to configure. Point, explore, recover.
+          RecoverMax combines filesystem-aware recovery and file carving in one tool —
+          something no other open-source project does.
         </p>
-
-        <div className={styles.steps}>
-          <div className={styles.step}>
-            <div className={styles.stepNumber}>1</div>
-            <h3>Point at a disk image</h3>
-            <p>
-              Pass a raw disk image, device file, or partition. RecoverMax
-              handles the rest.
-            </p>
-            <div className={styles.stepCmd}>recovermax ./disk.img</div>
-          </div>
-
-          <div className={styles.step}>
-            <div className={styles.stepNumber}>2</div>
-            <h3>Browse and explore</h3>
-            <p>
-              Use the interactive shell to navigate the recovered filesystem.
-              Preview files before recovering.
-            </p>
-            <div className={styles.stepCmd}>recovermax&gt; tree /home/</div>
-          </div>
-
-          <div className={styles.step}>
-            <div className={styles.stepNumber}>3</div>
-            <h3>Recover what you need</h3>
-            <p>
-              Selectively recover individual files, directories, or everything
-              at once.
-            </p>
-            <div className={styles.stepCmd}>
-              recovermax&gt; recover /home/ -o ./out/
-            </div>
-          </div>
+        <div className={styles.tableWrap}>
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th className={styles.highlight}>RecoverMax</th>
+                <th>Photorec</th>
+                <th>R-Linux</th>
+                <th>Sleuth Kit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.feature}>
+                  <td className={styles.featureCol}>{row.feature}</td>
+                  <td className={styles.highlight}>{row.recovermax}</td>
+                  <td>{row.photorec}</td>
+                  <td>{row.rlinux}</td>
+                  <td>{row.sleuthkit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </section>

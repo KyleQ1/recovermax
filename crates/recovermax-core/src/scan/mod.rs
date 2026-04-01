@@ -43,6 +43,20 @@ impl ScanReport {
     }
 }
 
+/// Options to control scan behavior
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    /// Run deep scan within partitions (walks every 1 MiB offset).
+    /// Off by default — for multi-TB images this can take a very long time.
+    pub deep_scan: bool,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self { deep_scan: false }
+    }
+}
+
 pub struct Scanner<'a> {
     reader: &'a ImageReader,
 }
@@ -187,14 +201,21 @@ impl<'a> Scanner<'a> {
         Ok(None)
     }
 
-    /// Full scan: detect partitions, then filesystems on each
+    /// Full scan with default options (no deep scan)
     pub fn full_scan(&self) -> Result<ScanReport> {
+        self.full_scan_with_options(&ScanOptions::default())
+    }
+
+    /// Full scan: detect partitions, then filesystems on each
+    pub fn full_scan_with_options(&self, options: &ScanOptions) -> Result<ScanReport> {
         let partitions = self.detect_partitions()?;
         let mut filesystems = Vec::new();
 
         // Check each partition for a known filesystem at its start
         for part in &partitions {
+            tracing::info!("Checking partition {} at offset {}...", part.name, bytesize::ByteSize(part.offset));
             if let Some(info) = self.detect_filesystem(part.offset)? {
+                tracing::info!("Found {} \"{}\" ({}) on {}", info.fs_type, info.label, bytesize::ByteSize(info.total_size), part.name);
                 filesystems.push(info);
             }
         }
@@ -206,10 +227,10 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        // If we haven't found any filesystems yet, do a deep scan within
-        // each partition. This handles LVM/ZFS/LUKS where the filesystem
-        // sits at an offset inside the partition, not at its start.
-        if filesystems.is_empty() {
+        // Deep scan only runs when explicitly requested — for multi-TB images
+        // the 1 MiB-step walk can take hours.
+        if filesystems.is_empty() && options.deep_scan {
+            tracing::info!("No filesystems found at partition starts, running deep scan...");
             for part in &partitions {
                 let found = self.deep_scan_partition(part.offset, part.size)?;
                 for info in found {
@@ -218,6 +239,8 @@ impl<'a> Scanner<'a> {
                     }
                 }
             }
+        } else if filesystems.is_empty() && !options.deep_scan {
+            tracing::info!("No filesystems found. Use --deep-scan to search within partitions (slow for large images).");
         }
 
         Ok(ScanReport {

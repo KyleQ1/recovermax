@@ -635,13 +635,15 @@ fn ntfs_fs_list_root_skips_metafiles() {
     let fs = ntfs::NtfsFs::new(&reader, 0).unwrap();
     let entries = fs.list_root().unwrap();
 
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].name, "readme.txt");
-    assert_eq!(entries[0].inode, 1);
-    assert_eq!(entries[0].size, 100);
-    assert_eq!(entries[1].name, "Documents");
-    assert_eq!(entries[1].inode, 3);
-    assert_eq!(entries[1].file_type, recovermax_core::fs::FileType::Directory);
+    // list_directory adds . and .. entries
+    let non_dot: Vec<_> = entries.iter().filter(|e| e.name != "." && e.name != "..").collect();
+    assert_eq!(non_dot.len(), 2);
+    assert_eq!(non_dot[0].name, "readme.txt");
+    assert_eq!(non_dot[0].inode, 1);
+    assert_eq!(non_dot[0].size, 100);
+    assert_eq!(non_dot[1].name, "Documents");
+    assert_eq!(non_dot[1].inode, 3);
+    assert_eq!(non_dot[1].file_type, recovermax_core::fs::FileType::Directory);
 }
 
 #[test]
@@ -665,8 +667,9 @@ fn ntfs_fs_list_root_skips_deleted() {
     let fs = ntfs::NtfsFs::new(&reader, 0).unwrap();
     let entries = fs.list_root().unwrap();
 
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "active.txt");
+    let non_dot: Vec<_> = entries.iter().filter(|e| e.name != "." && e.name != "..").collect();
+    assert_eq!(non_dot.len(), 1);
+    assert_eq!(non_dot[0].name, "active.txt");
 }
 
 #[test]
