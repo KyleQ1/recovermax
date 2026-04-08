@@ -1440,8 +1440,11 @@ fn recover_with_fallback(
         let ext4 = Ext4Fs::new(reader, filesystem.fs_info.offset)?;
         if node.file_type == FileType::Directory {
             if node.inode.is_some() {
-                recoverer
-                    .recover_session_subtree_to_path(&ext4, node, requested_path.as_deref())?;
+                recoverer.recover_session_subtree_to_path(
+                    &ext4,
+                    node,
+                    requested_path.as_deref(),
+                )?;
                 return Ok(());
             }
         } else {
