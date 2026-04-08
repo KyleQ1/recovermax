@@ -1279,6 +1279,12 @@ fn gpt_with_ext4_partition_full_scan() {
 
     // GPT partition entry at LBA 2
     let entry = 1024;
+    // Type GUID: Linux filesystem (0FC63DAF-8483-4772-8E79-3D69D8477DE4) in mixed-endian
+    let linux_fs_guid: [u8; 16] = [
+        0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+        0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
+    ];
+    img[entry..entry + 16].copy_from_slice(&linux_fs_guid);
     let first_lba = 2048u64;
     let last_lba = first_lba + (partition_blocks * 8) - 1; // 4096/512 = 8 sectors per block
     img[entry + 32..entry + 40].copy_from_slice(&first_lba.to_le_bytes());

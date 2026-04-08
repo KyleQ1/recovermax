@@ -169,9 +169,17 @@ fn build_gpt_image(partitions: &[(&str, u64, u64)]) -> Vec<u8> {
     // Size of partition entry
     img[hdr + 84..hdr + 88].copy_from_slice(&128u32.to_le_bytes());
 
+    // Linux filesystem type GUID (0FC63DAF-8483-4772-8E79-3D69D8477DE4) in mixed-endian
+    let linux_fs_guid: [u8; 16] = [
+        0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+        0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
+    ];
+
     // Partition entries at LBA 2 (offset 1024)
     for (i, &(name, first_lba, last_lba)) in partitions.iter().enumerate() {
         let off = 1024 + i * 128;
+        // Type GUID
+        img[off..off + 16].copy_from_slice(&linux_fs_guid);
         // First LBA
         img[off + 32..off + 40].copy_from_slice(&first_lba.to_le_bytes());
         // Last LBA

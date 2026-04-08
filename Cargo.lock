@@ -610,6 +610,8 @@ dependencies = [
  "anyhow",
  "bytesize",
  "clap",
+ "console",
+ "indicatif",
  "recovermax-core",
  "serde_json",
  "tracing",

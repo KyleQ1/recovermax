@@ -1,7 +1,11 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use recovermax_core::carve;
 use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
@@ -9,7 +13,7 @@ use recovermax_core::fs::ext4::{DeletedInode, Ext4Fs};
 use recovermax_core::fs::{EntrySource, FileType};
 use recovermax_core::io::ImageReader;
 use recovermax_core::recover;
-use recovermax_core::scan::{ScanOptions, Scanner};
+use recovermax_core::scan::{ScanEvent, ScanOptions, ScanPhase, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions, Searcher};
 use recovermax_core::session::{
     CacheSummary, FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, SessionNode,
@@ -40,6 +44,22 @@ pub enum Command {
         /// Deep scan within partitions at 1 MiB steps (slow for large images)
         #[arg(long)]
         deep_scan: bool,
+
+        /// Start scanning at this byte offset (supports K/M/G/T suffixes)
+        #[arg(long)]
+        start: Option<String>,
+
+        /// Stop scanning at this byte offset
+        #[arg(long)]
+        end: Option<String>,
+
+        /// Probe for file signatures during scan (comma-separated: jpeg,pdf,png)
+        #[arg(long, value_delimiter = ',')]
+        file_types: Vec<String>,
+
+        /// Only detect specific filesystem types (comma-separated: ext4,ntfs)
+        #[arg(long, value_delimiter = ',')]
+        fs_type: Vec<String>,
     },
 
     /// List filesystems from a session artifact or live scan
@@ -316,7 +336,11 @@ pub fn run(args: Args) -> Result<()> {
             image,
             output,
             deep_scan,
-        } => run_scan(&image, output, deep_scan),
+            start,
+            end,
+            file_types,
+            fs_type,
+        } => run_scan(&image, output, deep_scan, start, end, file_types, fs_type),
         Command::Filesystems {
             image,
             scan_file,
@@ -717,21 +741,301 @@ fn run_info(image: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_scan(image: &Path, output: Option<PathBuf>, deep_scan: bool) -> Result<()> {
+// ---------------------------------------------------------------------------
+// Scan visualization
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum BlockStatus {
+    Unscanned,
+    ScannedEmpty,
+    Ext4,
+    Ntfs,
+    Lvm,
+    FileSignature,
+}
+
+struct ScanDisplay {
+    image_size: u64,
+    current_phase: ScanPhase,
+    phase_total_bytes: u64,
+    bytes_scanned: u64,
+    phase_start_time: Instant,
+    filesystems_found: Vec<(String, u64, u64)>,
+    file_types_found: usize,
+    block_map: Vec<BlockStatus>,
+}
+
+impl ScanDisplay {
+    fn new(image_size: u64, width: usize) -> Self {
+        Self {
+            image_size,
+            current_phase: ScanPhase::Standard,
+            phase_total_bytes: image_size,
+            bytes_scanned: 0,
+            phase_start_time: Instant::now(),
+            filesystems_found: Vec::new(),
+            file_types_found: 0,
+            block_map: vec![BlockStatus::Unscanned; width],
+        }
+    }
+
+    fn handle_event(&mut self, event: &ScanEvent) {
+        match event {
+            ScanEvent::PhaseStarted { phase, total_bytes } => {
+                self.current_phase = *phase;
+                self.phase_total_bytes = *total_bytes;
+                self.bytes_scanned = 0;
+                self.phase_start_time = Instant::now();
+            }
+            ScanEvent::Progress { offset, bytes_scanned, .. } => {
+                self.bytes_scanned = *bytes_scanned;
+                let bucket = self.offset_to_bucket(*offset);
+                if bucket < self.block_map.len()
+                    && self.block_map[bucket] == BlockStatus::Unscanned
+                {
+                    self.block_map[bucket] = BlockStatus::ScannedEmpty;
+                }
+            }
+            ScanEvent::FilesystemFound { fs_type, label, offset, size } => {
+                self.filesystems_found.push((fs_type.clone(), *offset, *size));
+                let status = match fs_type.as_str() {
+                    "ext4" => BlockStatus::Ext4,
+                    "ntfs" => BlockStatus::Ntfs,
+                    _ => BlockStatus::Lvm,
+                };
+                let start_bucket = self.offset_to_bucket(*offset);
+                let end_bucket = self.offset_to_bucket(offset + size);
+                for b in start_bucket..=end_bucket.min(self.block_map.len().saturating_sub(1)) {
+                    self.block_map[b] = status;
+                }
+                let _ = label; // used in event, not needed in display state
+            }
+            ScanEvent::FileTypeFound { .. } => {
+                self.file_types_found += 1;
+            }
+            ScanEvent::PhaseComplete { .. } => {}
+            ScanEvent::TreeBuildStarted { .. } => {
+                self.current_phase = ScanPhase::TreeBuilding;
+                self.phase_start_time = Instant::now();
+            }
+            ScanEvent::TreeBuildProgress { .. } | ScanEvent::TreeBuildComplete { .. } => {}
+        }
+    }
+
+    fn offset_to_bucket(&self, offset: u64) -> usize {
+        if self.image_size == 0 {
+            return 0;
+        }
+        let bucket = (offset as u128 * self.block_map.len() as u128 / self.image_size as u128) as usize;
+        bucket.min(self.block_map.len().saturating_sub(1))
+    }
+
+    fn render_block_map(&self) -> String {
+        self.block_map
+            .iter()
+            .map(|status| match status {
+                BlockStatus::Unscanned => "\x1b[90m░\x1b[0m",
+                BlockStatus::ScannedEmpty => "\x1b[37m█\x1b[0m",
+                BlockStatus::Ext4 => "\x1b[32m▓\x1b[0m",
+                BlockStatus::Ntfs => "\x1b[34m▓\x1b[0m",
+                BlockStatus::Lvm => "\x1b[35m▓\x1b[0m",
+                BlockStatus::FileSignature => "\x1b[33m▓\x1b[0m",
+            })
+            .collect()
+    }
+
+    fn phase_name(&self) -> &'static str {
+        match self.current_phase {
+            ScanPhase::Standard => "Standard scan",
+            ScanPhase::PeBoundary => "PE-boundary scan",
+            ScanPhase::DeepScan => "Deep scan",
+            ScanPhase::TreeBuilding => "Building file tree",
+        }
+    }
+
+    fn speed_str(&self) -> String {
+        let elapsed = self.phase_start_time.elapsed().as_secs_f64();
+        if elapsed < 0.1 {
+            return String::new();
+        }
+        let speed = self.bytes_scanned as f64 / elapsed;
+        format!(" @ {}/s", bytesize::ByteSize(speed as u64))
+    }
+
+    fn eta_str(&self) -> String {
+        let elapsed = self.phase_start_time.elapsed().as_secs_f64();
+        if elapsed < 1.0 || self.bytes_scanned == 0 || self.phase_total_bytes == 0 {
+            return String::new();
+        }
+        let rate = self.bytes_scanned as f64 / elapsed;
+        let remaining = self.phase_total_bytes.saturating_sub(self.bytes_scanned) as f64;
+        let eta_secs = (remaining / rate) as u64;
+        if eta_secs < 60 {
+            format!(" | ETA: {}s", eta_secs)
+        } else if eta_secs < 3600 {
+            format!(" | ETA: {}m{}s", eta_secs / 60, eta_secs % 60)
+        } else {
+            format!(" | ETA: {}h{}m", eta_secs / 3600, (eta_secs % 3600) / 60)
+        }
+    }
+
+    fn fs_summary(&self) -> String {
+        if self.filesystems_found.is_empty() {
+            return "0".to_string();
+        }
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (fs_type, _, _) in &self.filesystems_found {
+            *counts.entry(fs_type.as_str()).or_default() += 1;
+        }
+        let parts: Vec<String> = counts
+            .iter()
+            .map(|(t, c)| {
+                if *c == 1 {
+                    t.to_string()
+                } else {
+                    format!("{}x{}", t, c)
+                }
+            })
+            .collect();
+        format!("{} [{}]", self.filesystems_found.len(), parts.join(", "))
+    }
+}
+
+fn parse_byte_offset(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num_part, multiplier) = if s.ends_with('T') || s.ends_with('t') {
+        (&s[..s.len() - 1], 1u64 << 40)
+    } else if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len() - 1], 1u64 << 30)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len() - 1], 1u64 << 20)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len() - 1], 1u64 << 10)
+    } else {
+        (s, 1u64)
+    };
+    let value: f64 = num_part.parse().context("invalid byte offset")?;
+    Ok((value * multiplier as f64) as u64)
+}
+
+fn maybe_prompt_for_scn(image: &Path, image_size: u64, output: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if output.is_some() {
+        return Ok(output);
+    }
+    if image_size < 10 * 1024 * 1024 * 1024 {
+        return Ok(None);
+    }
+
+    let default_path = image.with_extension("scn");
+    eprintln!(
+        "\nWarning: Image is {} — scanning may take a long time.",
+        bytesize::ByteSize(image_size)
+    );
+    eprint!(
+        "Save session to {}? (Enter=yes, type path, n=skip): ",
+        default_path.display()
+    );
+    std::io::stderr().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        Ok(Some(default_path))
+    } else if input.eq_ignore_ascii_case("n") || input.eq_ignore_ascii_case("no") {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(input)))
+    }
+}
+
+fn run_scan(
+    image: &Path,
+    output: Option<PathBuf>,
+    deep_scan: bool,
+    start: Option<String>,
+    end: Option<String>,
+    file_types: Vec<String>,
+    fs_type: Vec<String>,
+) -> Result<()> {
     let reader = ImageReader::open(image)?;
-    let scanner = Scanner::new(&reader);
+
+    let output = maybe_prompt_for_scn(image, reader.len(), output)?;
+
+    // Terminal width for block map
+    let term_width = console::Term::stdout().size().1 as usize;
+    let map_width = term_width.min(120).max(40);
+
+    let display = Arc::new(Mutex::new(ScanDisplay::new(reader.len(), map_width)));
+    let mp = MultiProgress::new();
+
+    let block_bar = mp.add(ProgressBar::new(0));
+    block_bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
+
+    let progress_bar = mp.add(ProgressBar::new(100));
+    progress_bar.set_style(
+        ProgressStyle::with_template(
+            " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes}{msg}",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+
+    let stats_bar = mp.add(ProgressBar::new_spinner());
+    stats_bar.set_style(ProgressStyle::with_template(" {spinner:.green} {msg}").unwrap());
+
+    let display_clone = Arc::clone(&display);
+    let block_bar_clone = block_bar.clone();
+    let progress_bar_clone = progress_bar.clone();
+    let stats_bar_clone = stats_bar.clone();
+
     let options = ScanOptions {
         deep_scan,
+        start_offset: start.as_deref().map(parse_byte_offset).transpose()?,
+        end_offset: end.as_deref().map(parse_byte_offset).transpose()?,
+        fs_type_filter: fs_type,
+        file_type_filter: file_types,
+        on_event: Some(Box::new(move |event| {
+            let mut state = display_clone.lock().unwrap();
+            state.handle_event(&event);
+
+            block_bar_clone.set_message(state.render_block_map());
+
+            progress_bar_clone.set_length(state.phase_total_bytes);
+            progress_bar_clone.set_position(state.bytes_scanned);
+            progress_bar_clone.set_message(format!(
+                " | {}{}{}",
+                state.phase_name(),
+                state.speed_str(),
+                state.eta_str(),
+            ));
+
+            stats_bar_clone.set_message(format!(
+                "Filesystems: {} | File signatures: {}",
+                state.fs_summary(),
+                state.file_types_found,
+            ));
+        })),
         ..Default::default()
     };
+
+    let scanner = Scanner::new(&reader);
     let report = scanner.full_scan_with_options(&options)?;
 
-    println!("{}", report.summary());
+    // Clear progress display
+    block_bar.finish_and_clear();
+    progress_bar.finish_and_clear();
+    stats_bar.finish_and_clear();
+
+    println!("\n{}", report.summary());
 
     if let Some(path) = output {
+        println!("Building session tree...");
         let artifact = RecoverySessionArtifact::from_scan(image, &reader, report.clone())?;
         artifact.save_to_path(&path)?;
-        println!("\nSession saved to {}", path.display());
+        println!("Session saved to {}", path.display());
     }
 
     Ok(())

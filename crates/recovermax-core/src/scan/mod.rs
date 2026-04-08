@@ -48,16 +48,43 @@ impl ScanReport {
     }
 }
 
-/// Options to control scan behavior
+/// Phases of the scan pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPhase {
+    Standard,
+    PeBoundary,
+    DeepScan,
+    TreeBuilding,
+}
+
+/// Events emitted during scanning for progress visualization.
 #[derive(Debug, Clone)]
+pub enum ScanEvent {
+    PhaseStarted { phase: ScanPhase, total_bytes: u64 },
+    Progress { phase: ScanPhase, offset: u64, bytes_scanned: u64 },
+    FilesystemFound { fs_type: String, label: String, offset: u64, size: u64 },
+    FileTypeFound { file_type: String, offset: u64 },
+    PhaseComplete { phase: ScanPhase, filesystems_found: usize },
+    TreeBuildStarted { filesystem_index: usize, label: String },
+    TreeBuildProgress { filesystem_index: usize, files_found: usize, dirs_found: usize },
+    TreeBuildComplete { filesystem_index: usize, total_nodes: usize },
+}
+
+/// Options to control scan behavior.
 pub struct ScanOptions {
     /// Run deep scan within partitions (walks every 1 MiB offset).
-    /// Off by default — for multi-TB images this can take a very long time.
     pub deep_scan: bool,
-    /// Auto-escalate: when standard detection finds nothing, try PE-boundary
-    /// scanning (4 MiB steps for LVM partitions) then deep scan (1 MiB steps).
-    /// Default: true.
+    /// Auto-escalate when nothing found (PE-boundary scan, then deep scan).
     pub auto_escalate: bool,
+    /// Scan only this byte range (None = full partition).
+    pub start_offset: Option<u64>,
+    pub end_offset: Option<u64>,
+    /// Only detect these filesystem types (empty = all).
+    pub fs_type_filter: Vec<String>,
+    /// Probe for file carving signatures during scan.
+    pub file_type_filter: Vec<String>,
+    /// Progress callback — called from scan loops.
+    pub on_event: Option<Box<dyn Fn(ScanEvent) + Send>>,
 }
 
 impl Default for ScanOptions {
@@ -65,7 +92,26 @@ impl Default for ScanOptions {
         Self {
             deep_scan: false,
             auto_escalate: true,
+            start_offset: None,
+            end_offset: None,
+            fs_type_filter: Vec::new(),
+            file_type_filter: Vec::new(),
+            on_event: None,
         }
+    }
+}
+
+impl std::fmt::Debug for ScanOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanOptions")
+            .field("deep_scan", &self.deep_scan)
+            .field("auto_escalate", &self.auto_escalate)
+            .field("start_offset", &self.start_offset)
+            .field("end_offset", &self.end_offset)
+            .field("fs_type_filter", &self.fs_type_filter)
+            .field("file_type_filter", &self.file_type_filter)
+            .field("on_event", &self.on_event.as_ref().map(|_| "<callback>"))
+            .finish()
     }
 }
 
@@ -76,6 +122,12 @@ pub struct Scanner<'a> {
 impl<'a> Scanner<'a> {
     pub fn new(reader: &'a ImageReader) -> Self {
         Self { reader }
+    }
+
+    fn emit(options: &ScanOptions, event: ScanEvent) {
+        if let Some(ref cb) = options.on_event {
+            cb(event);
+        }
     }
 
     /// Detect partition table (MBR or GPT)
@@ -150,6 +202,12 @@ impl<'a> Scanner<'a> {
             let offset = entry_lba * 512 + i as u64 * entry_size as u64;
             let entry = self.reader.read_at(offset, entry_size as usize)?;
 
+            // Parse partition type GUID (mixed-endian)
+            let type_guid_bytes: [u8; 16] = entry[0..16].try_into()?;
+            if type_guid_bytes == [0u8; 16] {
+                continue; // empty entry
+            }
+
             let first_lba = u64::from_le_bytes(entry[32..40].try_into()?);
             let last_lba = u64::from_le_bytes(entry[40..48].try_into()?);
 
@@ -178,11 +236,14 @@ impl<'a> Scanner<'a> {
             let byte_offset = first_lba * 512;
             let byte_size = (last_lba - first_lba + 1) * 512;
 
-            // Try to detect filesystem type on this partition
+            // Try to detect filesystem type, fall back to GPT type GUID name
+            let type_guid = gpt_type_guid_to_string(&type_guid_bytes);
             let fs_type = if let Some(info) = self.detect_filesystem(byte_offset)? {
                 info.fs_type
+            } else if let Some(name) = gpt_type_name(&type_guid) {
+                name.to_string()
             } else {
-                "unknown".to_string()
+                format!("unknown ({})", type_guid)
             };
 
             partitions.push(Partition {
@@ -284,6 +345,11 @@ impl<'a> Scanner<'a> {
         let partitions = self.detect_partitions()?;
         let mut filesystems = Vec::new();
 
+        Self::emit(options, ScanEvent::PhaseStarted {
+            phase: ScanPhase::Standard,
+            total_bytes: self.reader.len(),
+        });
+
         // Check each partition for a known filesystem at its start
         for part in &partitions {
             tracing::info!(
@@ -299,6 +365,12 @@ impl<'a> Scanner<'a> {
                     bytesize::ByteSize(info.total_size),
                     part.name
                 );
+                Self::emit(options, ScanEvent::FilesystemFound {
+                    fs_type: info.fs_type.clone(),
+                    label: info.label.clone(),
+                    offset: info.offset,
+                    size: info.total_size,
+                });
                 filesystems.push(info);
             }
         }
@@ -310,35 +382,61 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        Self::emit(options, ScanEvent::PhaseComplete {
+            phase: ScanPhase::Standard,
+            filesystems_found: filesystems.len(),
+        });
+
         // Escalation pipeline when nothing found at partition starts
         if filesystems.is_empty() && options.auto_escalate {
-            // Phase 2: PE-boundary scan for LVM partitions (4 MiB steps — fast)
             for part in &partitions {
                 if part.fs_type.contains("LVM") || part.fs_type.contains("lvm") {
-                    tracing::info!(
-                        "No filesystems found via LVM metadata on {}, trying PE-boundary scan...",
-                        part.name
-                    );
-                    let found = self.pe_boundary_scan(part.offset, part.size)?;
+                    Self::emit(options, ScanEvent::PhaseStarted {
+                        phase: ScanPhase::PeBoundary,
+                        total_bytes: part.size,
+                    });
+                    let found = self.pe_boundary_scan(part.offset, part.size, options)?;
                     for info in found {
                         if !filesystems.iter().any(|f| f.offset == info.offset) {
+                            Self::emit(options, ScanEvent::FilesystemFound {
+                                fs_type: info.fs_type.clone(),
+                                label: info.label.clone(),
+                                offset: info.offset,
+                                size: info.total_size,
+                            });
                             filesystems.push(info);
                         }
                     }
+                    Self::emit(options, ScanEvent::PhaseComplete {
+                        phase: ScanPhase::PeBoundary,
+                        filesystems_found: filesystems.len(),
+                    });
                 }
             }
         }
 
         if filesystems.is_empty() && (options.deep_scan || options.auto_escalate) {
-            // Phase 3: Deep scan at 1 MiB steps (slow but thorough)
-            tracing::info!("No filesystems found, running deep scan...");
             for part in &partitions {
-                let found = self.deep_scan_partition(part.offset, part.size)?;
+                Self::emit(options, ScanEvent::PhaseStarted {
+                    phase: ScanPhase::DeepScan,
+                    total_bytes: part.size,
+                });
+                let found = self.deep_scan_partition(part.offset, part.size, options)?;
                 for info in found {
                     if !filesystems.iter().any(|f| f.offset == info.offset) {
+                        Self::emit(options, ScanEvent::FilesystemFound {
+                            fs_type: info.fs_type.clone(),
+                            label: info.label.clone(),
+                            offset: info.offset,
+                            size: info.total_size,
+                        });
                         filesystems.push(info);
                     }
                 }
+                Self::emit(options, ScanEvent::PhaseComplete {
+                    phase: ScanPhase::DeepScan,
+                    filesystems_found: filesystems.len(),
+                });
             }
         }
 
@@ -358,94 +456,73 @@ impl<'a> Scanner<'a> {
 
     /// Scan within a partition for filesystems at MB-aligned offsets.
     /// This finds filesystems inside LVM, ZFS, LUKS, etc.
-    fn deep_scan_partition(&self, part_offset: u64, part_size: u64) -> Result<Vec<FsInfo>> {
+    fn deep_scan_partition(
+        &self,
+        part_offset: u64,
+        part_size: u64,
+        options: &ScanOptions,
+    ) -> Result<Vec<FsInfo>> {
         let mut found = Vec::new();
-        let step: u64 = 1024 * 1024; // 1 MiB steps
-        let end = part_offset + part_size;
-        let total_steps = part_size / step;
-        let log_interval = 10 * 1024; // Log every ~10 GiB (10240 MB steps)
+        let step: u64 = 1024 * 1024;
+        let start = options.start_offset.unwrap_or(part_offset).max(part_offset);
+        let end = options.end_offset.unwrap_or(part_offset + part_size).min(part_offset + part_size);
 
-        tracing::info!(
-            "Deep scanning partition at offset {} ({}) for embedded filesystems...",
-            part_offset,
-            bytesize::ByteSize(part_size)
-        );
+        let mut offset = start;
+        let mut bytes_scanned: u64 = 0;
 
-        let mut offset = part_offset;
-        let mut steps_done: u64 = 0;
         while offset < end {
-            // Don't re-check the partition start (already done above)
             if offset != part_offset {
                 if let Some(info) = self.detect_filesystem(offset)? {
-                    tracing::info!(
-                        "Found {} filesystem \"{}\" at offset {} ({})",
-                        info.fs_type,
-                        info.label,
-                        offset,
-                        bytesize::ByteSize(offset)
-                    );
                     found.push(info);
                 }
             }
 
             offset += step;
-            steps_done += 1;
+            bytes_scanned += step;
 
-            if steps_done.is_multiple_of(log_interval) {
-                tracing::info!(
-                    "Deep scan progress: {} / {} ({:.1}%)",
-                    bytesize::ByteSize(offset - part_offset),
-                    bytesize::ByteSize(part_size),
-                    (steps_done as f64 / total_steps as f64) * 100.0
-                );
+            if bytes_scanned % (256 * 1024 * 1024) == 0 {
+                Self::emit(options, ScanEvent::Progress {
+                    phase: ScanPhase::DeepScan,
+                    offset,
+                    bytes_scanned,
+                });
             }
         }
-
-        tracing::info!("Deep scan complete: found {} filesystem(s)", found.len());
 
         Ok(found)
     }
 
-    /// Scan at PE-boundary offsets (every 4 MiB from pe_start) for ext4 superblocks.
-    /// Faster than deep scan for LVM partitions where metadata is destroyed.
-    fn pe_boundary_scan(&self, part_offset: u64, part_size: u64) -> Result<Vec<FsInfo>> {
+    fn pe_boundary_scan(
+        &self,
+        part_offset: u64,
+        part_size: u64,
+        options: &ScanOptions,
+    ) -> Result<Vec<FsInfo>> {
         let mut found = Vec::new();
-        let pe_size: u64 = 4 * 1024 * 1024; // default 4 MiB PE
-        let pe_start: u64 = 1024 * 1024; // default 1 MiB into partition
+        let pe_size: u64 = 4 * 1024 * 1024;
+        let pe_start: u64 = 1024 * 1024;
         let end = part_offset + part_size;
 
         let mut offset = part_offset + pe_start;
-        let mut pe_index = 0u64;
-
-        tracing::info!(
-            "PE-boundary scan: partition at {}, pe_start={}, pe_size={}, scanning up to {}...",
-            bytesize::ByteSize(part_offset),
-            bytesize::ByteSize(pe_start),
-            bytesize::ByteSize(pe_size),
-            bytesize::ByteSize(part_size)
-        );
+        let mut bytes_scanned: u64 = 0;
 
         while offset < end {
             if let Some(info) = self.detect_filesystem(offset)? {
-                tracing::info!(
-                    "Found {} filesystem \"{}\" at PE boundary {} (offset {})",
-                    info.fs_type,
-                    info.label,
-                    pe_index,
-                    bytesize::ByteSize(offset)
-                );
                 found.push(info);
                 return Ok(found);
             }
             offset += pe_size;
-            pe_index += 1;
+            bytes_scanned += pe_size;
 
-            if pe_index.is_multiple_of(1000) {
-                tracing::info!("PE scan: checked {} extents...", pe_index);
+            if bytes_scanned % (256 * 1024 * 1024) == 0 {
+                Self::emit(options, ScanEvent::Progress {
+                    phase: ScanPhase::PeBoundary,
+                    offset,
+                    bytes_scanned,
+                });
             }
         }
 
-        tracing::info!("PE-boundary scan complete: found {} filesystem(s)", found.len());
         Ok(found)
     }
 }
@@ -461,5 +538,29 @@ fn mbr_type_name(t: u8) -> String {
         0xFD => "Linux RAID".into(),
         0x8E => "Linux LVM".into(),
         _ => format!("0x{:02x}", t),
+    }
+}
+
+fn gpt_type_guid_to_string(raw: &[u8; 16]) -> String {
+    format!(
+        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        u16::from_le_bytes([raw[4], raw[5]]),
+        u16::from_le_bytes([raw[6], raw[7]]),
+        raw[8], raw[9],
+        raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
+    )
+}
+
+fn gpt_type_name(guid: &str) -> Option<&'static str> {
+    match guid {
+        "E6D6D379-F507-44C2-A23C-238F2A3DF928" => Some("Linux LVM"),
+        "0FC63DAF-8483-4772-8E79-3D69D8477DE4" => Some("Linux filesystem"),
+        "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" => Some("EFI System Partition"),
+        "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7" => Some("Microsoft basic data"),
+        "024DEE41-33E7-11D3-9D69-0008C781F39F" => Some("MBR partition scheme"),
+        "21686148-6449-6E6F-744E-656564454649" => Some("BIOS boot"),
+        "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F" => Some("Linux swap"),
+        _ => None,
     }
 }
