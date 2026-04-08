@@ -387,10 +387,25 @@ impl<'a> Scanner<'a> {
             filesystems_found: filesystems.len(),
         });
 
-        // Escalation pipeline when nothing found at partition starts
-        if filesystems.is_empty() && options.auto_escalate {
+        // Collect which partitions already have a filesystem detected
+        let covered_offsets: Vec<u64> = filesystems.iter().map(|f| f.offset).collect();
+
+        // Escalation: for each partition that DIDN'T have a filesystem at its start,
+        // try PE-boundary scan (LVM) then deep scan (1 MiB steps).
+        if options.auto_escalate || options.deep_scan {
             for part in &partitions {
-                if part.fs_type.contains("LVM") || part.fs_type.contains("lvm") {
+                // Skip partitions that already have a detected filesystem
+                let has_fs = covered_offsets.iter().any(|&off| {
+                    off >= part.offset && off < part.offset + part.size
+                });
+                if has_fs {
+                    continue;
+                }
+
+                // PE-boundary scan for LVM partitions
+                if options.auto_escalate
+                    && (part.fs_type.contains("LVM") || part.fs_type.contains("lvm"))
+                {
                     Self::emit(options, ScanEvent::PhaseStarted {
                         phase: ScanPhase::PeBoundary,
                         total_bytes: part.size,
@@ -412,31 +427,33 @@ impl<'a> Scanner<'a> {
                         filesystems_found: filesystems.len(),
                     });
                 }
-            }
-        }
 
-        if filesystems.is_empty() && (options.deep_scan || options.auto_escalate) {
-            for part in &partitions {
-                Self::emit(options, ScanEvent::PhaseStarted {
-                    phase: ScanPhase::DeepScan,
-                    total_bytes: part.size,
+                // Deep scan if PE-boundary didn't find anything on this partition
+                let now_has_fs = filesystems.iter().any(|f| {
+                    f.offset >= part.offset && f.offset < part.offset + part.size
                 });
-                let found = self.deep_scan_partition(part.offset, part.size, options)?;
-                for info in found {
-                    if !filesystems.iter().any(|f| f.offset == info.offset) {
-                        Self::emit(options, ScanEvent::FilesystemFound {
-                            fs_type: info.fs_type.clone(),
-                            label: info.label.clone(),
-                            offset: info.offset,
-                            size: info.total_size,
-                        });
-                        filesystems.push(info);
+                if !now_has_fs {
+                    Self::emit(options, ScanEvent::PhaseStarted {
+                        phase: ScanPhase::DeepScan,
+                        total_bytes: part.size,
+                    });
+                    let found = self.deep_scan_partition(part.offset, part.size, options)?;
+                    for info in found {
+                        if !filesystems.iter().any(|f| f.offset == info.offset) {
+                            Self::emit(options, ScanEvent::FilesystemFound {
+                                fs_type: info.fs_type.clone(),
+                                label: info.label.clone(),
+                                offset: info.offset,
+                                size: info.total_size,
+                            });
+                            filesystems.push(info);
+                        }
                     }
+                    Self::emit(options, ScanEvent::PhaseComplete {
+                        phase: ScanPhase::DeepScan,
+                        filesystems_found: filesystems.len(),
+                    });
                 }
-                Self::emit(options, ScanEvent::PhaseComplete {
-                    phase: ScanPhase::DeepScan,
-                    filesystems_found: filesystems.len(),
-                });
             }
         }
 
