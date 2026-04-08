@@ -143,7 +143,16 @@ impl<'a> Recoverer<'a> {
     }
 
     pub fn recover_session_node(&self, ext4: &Ext4Fs, node: &SessionNode) -> Result<()> {
-        let relative_path = node.path.trim_start_matches('/');
+        self.recover_session_node_to_path(ext4, node, None)
+    }
+
+    pub fn recover_session_node_to_path(
+        &self,
+        ext4: &Ext4Fs,
+        node: &SessionNode,
+        output_path: Option<&str>,
+    ) -> Result<()> {
+        let relative_path = output_path.unwrap_or(&node.path).trim_start_matches('/');
         let dest_path = self.dest.join(relative_path);
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -202,10 +211,19 @@ impl<'a> Recoverer<'a> {
     }
 
     pub fn recover_session_subtree(&self, ext4: &Ext4Fs, node: &SessionNode) -> Result<()> {
+        self.recover_session_subtree_to_path(ext4, node, None)
+    }
+
+    pub fn recover_session_subtree_to_path(
+        &self,
+        ext4: &Ext4Fs,
+        node: &SessionNode,
+        output_path: Option<&str>,
+    ) -> Result<()> {
         let inode_num = node
             .inode
             .ok_or_else(|| anyhow::anyhow!("session node {} has no inode", node.path))?;
-        let relative_path = node.path.trim_start_matches('/');
+        let relative_path = output_path.unwrap_or(&node.path).trim_start_matches('/');
         let dest_path = self.dest.join(relative_path);
         std::fs::create_dir_all(&dest_path)?;
 
