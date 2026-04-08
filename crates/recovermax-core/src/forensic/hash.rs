@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Streaming SHA-256 hasher for disk images.
 /// Reads in 8 MiB chunks to handle multi-TB images without loading into memory.
@@ -20,7 +20,8 @@ impl ImageHasher {
         let mut buf = vec![0u8; CHUNK_SIZE];
 
         loop {
-            let n = file.read(&mut buf)
+            let n = file
+                .read(&mut buf)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             if n == 0 {
                 break;
@@ -54,7 +55,10 @@ mod tests {
     fn test_hash_bytes() {
         // SHA-256 of empty string
         let hash = ImageHasher::hash_bytes(b"");
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -83,6 +87,10 @@ mod tests {
 
         let hash = ImageHasher::hash_file(&path).unwrap();
         assert!(ImageHasher::verify_file(&path, &hash).unwrap());
-        assert!(!ImageHasher::verify_file(&path, "0000000000000000000000000000000000000000000000000000000000000000").unwrap());
+        assert!(!ImageHasher::verify_file(
+            &path,
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        .unwrap());
     }
 }

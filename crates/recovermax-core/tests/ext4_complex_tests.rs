@@ -1,11 +1,13 @@
 //! Complex ext4 tests that build realistic on-disk structures.
 //! These test the full chain: superblock → block group descriptors → inode table → extents → data.
 
+use recovermax_core::fs::ext4::Ext4Fs;
+use recovermax_core::fs::{EntrySource, FileType};
+use recovermax_core::io::ImageReader;
+use recovermax_core::search::{SearchOptions, Searcher};
+use recovermax_core::session::RecoverySessionArtifact;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use recovermax_core::io::ImageReader;
-use recovermax_core::fs::ext4::{self, Ext4Fs};
-use recovermax_core::fs::FileType;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -61,7 +63,7 @@ impl Ext4ImageBuilder {
         self.write_u32(sb + 0x10, self.inodes_per_group / 2);
         // first_data_block
         self.write_u32(sb + 0x14, 0); // 0 for 4K blocks
-        // log_block_size
+                                      // log_block_size
         self.write_u32(sb + 0x18, log_bs);
         // blocks_per_group
         self.write_u32(sb + 0x20, 8192);
@@ -72,7 +74,7 @@ impl Ext4ImageBuilder {
         // inode_size
         self.write_u16(sb + 0x58, self.inode_size);
         // feature_incompat: extents + 64bit
-        self.write_u32(sb + 0x60, 0x42);
+        self.write_u32(sb + 0x60, 0xC0);
         // UUID
         for i in 0..16 {
             self.data[sb + 0x68 + i] = (i + 1) as u8;
@@ -124,25 +126,19 @@ impl Ext4ImageBuilder {
         // block_data[0..60] = extent tree
         let ext_off = off + 40;
         // Extent header
-        self.write_u16(ext_off, 0xF30A);     // magic
-        self.write_u16(ext_off + 2, 1);       // entries
-        self.write_u16(ext_off + 4, 4);       // max entries
-        self.write_u16(ext_off + 6, 0);       // depth (leaf)
-        // Extent entry at ext_off + 12
-        self.write_u32(ext_off + 12, 0);                      // logical block
-        self.write_u16(ext_off + 16, block_count);             // block count
+        self.write_u16(ext_off, 0xF30A); // magic
+        self.write_u16(ext_off + 2, 1); // entries
+        self.write_u16(ext_off + 4, 4); // max entries
+        self.write_u16(ext_off + 6, 0); // depth (leaf)
+                                        // Extent entry at ext_off + 12
+        self.write_u32(ext_off + 12, 0); // logical block
+        self.write_u16(ext_off + 16, block_count); // block count
         self.write_u16(ext_off + 18, (data_block >> 32) as u16); // start_hi
-        self.write_u32(ext_off + 20, data_block as u32);       // start_lo
+        self.write_u32(ext_off + 20, data_block as u32); // start_lo
     }
 
     /// Write an inode using block map (no extents) with direct block pointers
-    fn write_inode_with_blockmap(
-        &mut self,
-        inode_num: u64,
-        mode: u16,
-        size: u64,
-        blocks: &[u32],
-    ) {
+    fn write_inode_with_blockmap(&mut self, inode_num: u64, mode: u16, size: u64, blocks: &[u32]) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
         let off = self.inode_table_block as usize * self.block_size as usize
             + index as usize * self.inode_size as usize;
@@ -216,12 +212,15 @@ fn read_root_directory_entries() {
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
 
     // Directory entries in block 10: ".", "..", "hello.txt", "subdir"
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 1, "hello.txt"),
-        (12, 2, "subdir"),
-    ]);
+    builder.write_dir_entries(
+        10,
+        &[
+            (2, 2, "."),
+            (2, 2, ".."),
+            (11, 1, "hello.txt"),
+            (12, 2, "subdir"),
+        ],
+    );
 
     let img = builder.build();
     let f = create_test_image(&img);
@@ -414,22 +413,22 @@ fn read_file_with_multiple_extents() {
 
     // Extent tree with 2 entries
     let ext = off + 40;
-    builder.write_u16(ext, 0xF30A);     // magic
-    builder.write_u16(ext + 2, 2);       // 2 entries
-    builder.write_u16(ext + 4, 4);       // max
-    builder.write_u16(ext + 6, 0);       // depth 0
+    builder.write_u16(ext, 0xF30A); // magic
+    builder.write_u16(ext + 2, 2); // 2 entries
+    builder.write_u16(ext + 4, 4); // max
+    builder.write_u16(ext + 6, 0); // depth 0
 
     // Extent 1: logical block 0, 2 blocks at physical 20
-    builder.write_u32(ext + 12, 0);      // logical
-    builder.write_u16(ext + 16, 2);      // count
-    builder.write_u16(ext + 18, 0);      // start_hi
-    builder.write_u32(ext + 20, 20);     // start_lo
+    builder.write_u32(ext + 12, 0); // logical
+    builder.write_u16(ext + 16, 2); // count
+    builder.write_u16(ext + 18, 0); // start_hi
+    builder.write_u32(ext + 20, 20); // start_lo
 
     // Extent 2: logical block 2, 1 block at physical 50
-    builder.write_u32(ext + 24, 2);      // logical
-    builder.write_u16(ext + 28, 1);      // count
-    builder.write_u16(ext + 30, 0);      // start_hi
-    builder.write_u32(ext + 32, 50);     // start_lo
+    builder.write_u32(ext + 24, 2); // logical
+    builder.write_u16(ext + 28, 1); // count
+    builder.write_u16(ext + 30, 0); // start_hi
+    builder.write_u32(ext + 32, 50); // start_lo
 
     // Write data
     builder.write_data(20, &vec![0x11u8; 4096]);
@@ -445,9 +444,18 @@ fn read_file_with_multiple_extents() {
     let data = fs.read_inode_data(&inode).unwrap();
 
     assert_eq!(data.len(), 3 * 4096);
-    assert!(data[0..4096].iter().all(|&b| b == 0x11), "First extent block 1");
-    assert!(data[4096..8192].iter().all(|&b| b == 0x22), "First extent block 2");
-    assert!(data[8192..12288].iter().all(|&b| b == 0x33), "Second extent");
+    assert!(
+        data[0..4096].iter().all(|&b| b == 0x11),
+        "First extent block 1"
+    );
+    assert!(
+        data[4096..8192].iter().all(|&b| b == 0x22),
+        "First extent block 2"
+    );
+    assert!(
+        data[8192..12288].iter().all(|&b| b == 0x33),
+        "Second extent"
+    );
 }
 
 // ===========================================================================
@@ -474,32 +482,32 @@ fn read_file_with_depth1_extent_tree() {
 
     // Root extent tree: depth=1, 1 index entry pointing to block 30
     let ext = off + 40;
-    builder.write_u16(ext, 0xF30A);      // magic
-    builder.write_u16(ext + 2, 1);        // 1 entry
-    builder.write_u16(ext + 4, 4);        // max
-    builder.write_u16(ext + 6, 1);        // depth=1
+    builder.write_u16(ext, 0xF30A); // magic
+    builder.write_u16(ext + 2, 1); // 1 entry
+    builder.write_u16(ext + 4, 4); // max
+    builder.write_u16(ext + 6, 1); // depth=1
 
     // Index entry: logical=0, leaf at block 30
     // ext4_extent_idx format:
     //   0-3: ei_block (logical block)
     //   4-7: ei_leaf_lo (lower 32 bits of next-level block)
     //   8-9: ei_leaf_hi (upper 16 bits)
-    builder.write_u32(ext + 12, 0);       // logical block
-    builder.write_u32(ext + 16, 30);      // leaf_lo = block 30
-    builder.write_u16(ext + 20, 0);       // leaf_hi
+    builder.write_u32(ext + 12, 0); // logical block
+    builder.write_u32(ext + 16, 30); // leaf_lo = block 30
+    builder.write_u16(ext + 20, 0); // leaf_hi
 
     // Block 30 = leaf extent node
     let leaf_off = 30 * 4096;
-    builder.write_u16(leaf_off, 0xF30A);   // magic
-    builder.write_u16(leaf_off + 2, 1);     // 1 extent entry
-    builder.write_u16(leaf_off + 4, 340);   // max
-    builder.write_u16(leaf_off + 6, 0);     // depth=0
+    builder.write_u16(leaf_off, 0xF30A); // magic
+    builder.write_u16(leaf_off + 2, 1); // 1 extent entry
+    builder.write_u16(leaf_off + 4, 340); // max
+    builder.write_u16(leaf_off + 6, 0); // depth=0
 
     // Leaf extent: 1 block at physical block 40
-    builder.write_u32(leaf_off + 12, 0);    // logical
-    builder.write_u16(leaf_off + 16, 1);    // count
-    builder.write_u16(leaf_off + 18, 0);    // start_hi
-    builder.write_u32(leaf_off + 20, 40);   // start_lo
+    builder.write_u32(leaf_off + 12, 0); // logical
+    builder.write_u16(leaf_off + 16, 1); // count
+    builder.write_u16(leaf_off + 18, 0); // start_hi
+    builder.write_u32(leaf_off + 20, 40); // start_lo
 
     // Actual data at block 40
     builder.write_data(40, &vec![0xDDu8; 4096]);
@@ -513,7 +521,10 @@ fn read_file_with_depth1_extent_tree() {
     let data = fs.read_inode_data(&inode).unwrap();
 
     assert_eq!(data.len(), 4096);
-    assert!(data.iter().all(|&b| b == 0xDD), "Data should be 0xDD from block 40");
+    assert!(
+        data.iter().all(|&b| b == 0xDD),
+        "Data should be 0xDD from block 40"
+    );
 }
 
 // ===========================================================================
@@ -561,12 +572,15 @@ fn full_recovery_pipeline() {
 
     // Root inode (#2) = directory at block 10
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 1, "readme.txt"),
-        (12, 2, "data"),
-    ]);
+    builder.write_dir_entries(
+        10,
+        &[
+            (2, 2, "."),
+            (2, 2, ".."),
+            (11, 1, "readme.txt"),
+            (12, 2, "data"),
+        ],
+    );
 
     // readme.txt (inode 11) = file at block 20
     let readme_content = b"RecoverMax test file content\n";
@@ -575,11 +589,7 @@ fn full_recovery_pipeline() {
 
     // data/ (inode 12) = directory at block 30
     builder.write_inode_with_extent(12, 0x4000 | 0o755, 4096, 30, 1);
-    builder.write_dir_entries(30, &[
-        (12, 2, "."),
-        (2, 2, ".."),
-        (13, 1, "numbers.bin"),
-    ]);
+    builder.write_dir_entries(30, &[(12, 2, "."), (2, 2, ".."), (13, 1, "numbers.bin")]);
 
     // data/numbers.bin (inode 13) = file at block 40
     let numbers: Vec<u8> = (0..=255).cycle().take(1000).collect();
@@ -608,7 +618,10 @@ fn full_recovery_pipeline() {
     assert_eq!(recovered, readme_content);
 
     let numbers_path = dest.path().join("data/numbers.bin");
-    assert!(numbers_path.exists(), "data/numbers.bin should be recovered");
+    assert!(
+        numbers_path.exists(),
+        "data/numbers.bin should be recovered"
+    );
     let recovered = std::fs::read(&numbers_path).unwrap();
     assert_eq!(recovered, numbers);
 }
@@ -624,13 +637,16 @@ fn recovery_with_path_filter() {
     builder.write_block_group_descriptor(0, 3);
 
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 1, "keep.txt"),
-        (12, 1, "skip.txt"),
-        (13, 2, "subdir"),
-    ]);
+    builder.write_dir_entries(
+        10,
+        &[
+            (2, 2, "."),
+            (2, 2, ".."),
+            (11, 1, "keep.txt"),
+            (12, 1, "skip.txt"),
+            (13, 2, "subdir"),
+        ],
+    );
 
     builder.write_inode_with_extent(11, 0x8000, 5, 20, 1);
     builder.write_data(20, b"keep!");
@@ -639,11 +655,7 @@ fn recovery_with_path_filter() {
     builder.write_data(21, b"skip!");
 
     builder.write_inode_with_extent(13, 0x4000, 4096, 30, 1);
-    builder.write_dir_entries(30, &[
-        (13, 2, "."),
-        (2, 2, ".."),
-        (14, 1, "nested.txt"),
-    ]);
+    builder.write_dir_entries(30, &[(13, 2, "."), (2, 2, ".."), (14, 1, "nested.txt")]);
     builder.write_inode_with_extent(14, 0x8000, 7, 31, 1);
     builder.write_data(31, b"nested!");
 
@@ -663,6 +675,38 @@ fn recovery_with_path_filter() {
     // keep.txt and skip.txt should NOT exist
     assert!(!dest.path().join("keep.txt").exists());
     assert!(!dest.path().join("skip.txt").exists());
+}
+
+#[test]
+fn recovery_with_saved_session_artifact() {
+    let mut builder = Ext4ImageBuilder::new(128);
+    builder.write_superblock("artifact-recovery");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "saved.txt")]);
+
+    let content = b"saved-session";
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, content.len() as u64, 20, 1);
+    builder.write_data(20, content);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let artifact =
+        recovermax_core::session::RecoverySessionArtifact::from_scan(f.path(), &reader, report)
+            .unwrap();
+
+    let dest = tempfile::TempDir::new().unwrap();
+    let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
+    recoverer.recover_artifact(&artifact, Some("/saved.txt")).unwrap();
+
+    let recovered_path = dest.path().join("saved.txt");
+    assert!(recovered_path.exists(), "saved.txt should be recovered");
+    let recovered = std::fs::read(&recovered_path).unwrap();
+    assert_eq!(recovered, content);
 }
 
 // ===========================================================================
@@ -730,6 +774,343 @@ fn directory_with_deleted_entries() {
     assert!(!active.unwrap().deleted);
 }
 
+#[test]
+fn deleted_entries_in_directory_slack_are_preserved() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("deleted-slack");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 5, 20, 1);
+    builder.write_data(20, b"live!");
+    builder.write_inode_with_extent(12, 0x8000 | 0o644, 5, 21, 1);
+    builder.write_data(21, b"tail!");
+    builder.write_inode_with_extent(13, 0x8000 | 0o644, 5, 22, 1);
+    builder.write_data(22, b"ghost");
+    let inode13_off = 3 * 4096 + 12 * 256;
+    builder.write_u16(inode13_off + 26, 0);
+
+    let block_off = 10 * 4096;
+    let mut pos = block_off;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 1;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    pos += 12;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 2;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    builder.data[pos + 9] = b'.';
+    pos += 12;
+
+    let live_pos = pos;
+    builder.write_u32(live_pos, 11);
+    builder.write_u16(live_pos + 4, 40);
+    builder.data[live_pos + 6] = 8;
+    builder.data[live_pos + 7] = 1;
+    builder.data[live_pos + 8..live_pos + 16].copy_from_slice(b"live.txt");
+
+    let deleted_pos = live_pos + 16;
+    builder.write_u32(deleted_pos, 13);
+    builder.write_u16(deleted_pos + 4, 24);
+    builder.data[deleted_pos + 6] = 9;
+    builder.data[deleted_pos + 7] = 1;
+    builder.data[deleted_pos + 8..deleted_pos + 17].copy_from_slice(b"ghost.bin");
+    pos += 40;
+
+    builder.write_u32(pos, 12);
+    builder.write_u16(pos + 4, (4096 - (pos - block_off)) as u16);
+    builder.data[pos + 6] = 8;
+    builder.data[pos + 7] = 1;
+    builder.data[pos + 8..pos + 16].copy_from_slice(b"tail.txt");
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let entries = fs.list_directory(2).unwrap();
+    let deleted = entries.iter().find(|entry| entry.name == "ghost.bin").unwrap();
+    assert!(deleted.deleted);
+    assert_eq!(deleted.inode, 13);
+    assert_eq!(deleted.file_type, FileType::RegularFile);
+    assert_eq!(deleted.source, EntrySource::DeletedSlack);
+    assert_eq!(deleted.parent_inode, Some(2));
+
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let searcher = Searcher::new(&reader);
+    let matches = searcher
+        .search(&report, "ghost", &SearchOptions::default())
+        .unwrap();
+    let ghost_match = matches
+        .iter()
+        .find(|m| m.path == "/ghost.bin")
+        .unwrap();
+    assert!(ghost_match.deleted);
+    assert_eq!(ghost_match.inode, 13);
+    assert_eq!(ghost_match.source, EntrySource::DeletedSlack);
+    assert_eq!(ghost_match.parent_inode, Some(2));
+
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+    let ghost = artifact.filesystems[0]
+        .nodes
+        .iter()
+        .find(|node| node.path == "/ghost.bin")
+        .unwrap();
+    assert!(ghost.deleted);
+    assert_eq!(ghost.file_type, FileType::RegularFile);
+    assert_eq!(ghost.source, EntrySource::DeletedSlack);
+    assert_eq!(ghost.parent_inode, Some(2));
+}
+
+#[test]
+fn deleted_directory_children_are_searchable_and_recoverable() {
+    let mut builder = Ext4ImageBuilder::new(96);
+    builder.write_superblock("deleted-dir");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 4, 20, 1);
+    builder.write_data(20, b"live");
+    builder.write_inode_with_extent(13, 0x4000 | 0o755, 4096, 30, 1);
+    builder.write_inode_with_extent(14, 0x8000 | 0o644, 6, 40, 1);
+    builder.write_data(40, b"secret");
+
+    let inode13_off = 3 * 4096 + 12 * 256;
+    builder.write_u16(inode13_off + 26, 0);
+
+    builder.write_dir_entries(30, &[(13, 2, "."), (2, 2, ".."), (14, 1, "hidden.txt")]);
+
+    let block_off = 10 * 4096;
+    let mut pos = block_off;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 1;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    pos += 12;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 2;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    builder.data[pos + 9] = b'.';
+    pos += 12;
+
+    let live_pos = pos;
+    builder.write_u32(live_pos, 11);
+    builder.write_u16(live_pos + 4, 36);
+    builder.data[live_pos + 6] = 8;
+    builder.data[live_pos + 7] = 1;
+    builder.data[live_pos + 8..live_pos + 16].copy_from_slice(b"live.txt");
+
+    let deleted_pos = live_pos + 16;
+    builder.write_u32(deleted_pos, 13);
+    builder.write_u16(deleted_pos + 4, 20);
+    builder.data[deleted_pos + 6] = 5;
+    builder.data[deleted_pos + 7] = 2;
+    builder.data[deleted_pos + 8..deleted_pos + 13].copy_from_slice(b"trash");
+    pos += 36;
+
+    builder.write_u32(pos, 12);
+    builder.write_u16(pos + 4, (4096 - (pos - block_off)) as u16);
+    builder.data[pos + 6] = 8;
+    builder.data[pos + 7] = 1;
+    builder.data[pos + 8..pos + 16].copy_from_slice(b"tail.txt");
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let searcher = Searcher::new(&reader);
+    let matches = searcher
+        .search(&report, "hidden", &SearchOptions::default())
+        .unwrap();
+    assert!(matches.iter().any(|m| m.path == "/trash/hidden.txt"));
+
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+    assert!(artifact.filesystems[0]
+        .nodes
+        .iter()
+        .any(|node| node.path == "/trash" && node.deleted && node.file_type == FileType::Directory));
+    assert!(artifact.filesystems[0]
+        .nodes
+        .iter()
+        .any(|node| node.path == "/trash/hidden.txt"));
+
+    let dest = tempfile::TempDir::new().unwrap();
+    let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
+    recoverer
+        .recover_artifact(&artifact, Some("/trash/hidden.txt"))
+        .unwrap();
+
+    let recovered = std::fs::read(dest.path().join("trash/hidden.txt")).unwrap();
+    assert_eq!(recovered, b"secret");
+}
+
+#[test]
+fn deleted_inode_without_directory_entry_gets_orphan_path() {
+    let mut builder = Ext4ImageBuilder::new(96);
+    builder.write_superblock("orphan-deleted");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 4, 20, 1);
+    builder.write_data(20, b"live");
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "live.txt")]);
+
+    builder.write_inode_with_extent(13, 0x8000 | 0o644, 8, 30, 1);
+    builder.write_data(30, b"orphaned");
+    let inode13_off = 3 * 4096 + 12 * 256;
+    builder.write_u16(inode13_off + 26, 0);
+    builder.write_u32(inode13_off + 20, 1234567890);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+
+    assert!(artifact.filesystems[0]
+        .nodes
+        .iter()
+        .any(|node| node.path == "/$OrphanFiles" && node.file_type == FileType::Directory));
+    let orphan = artifact.filesystems[0]
+        .nodes
+        .iter()
+        .find(|node| node.path == "/$OrphanFiles/OrphanFile-13")
+        .unwrap();
+    assert!(orphan.deleted);
+    assert_eq!(orphan.inode, Some(13));
+    assert_eq!(orphan.size, Some(8));
+
+    let dest = tempfile::TempDir::new().unwrap();
+    let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
+    recoverer
+        .recover_artifact(&artifact, Some("/$OrphanFiles/OrphanFile-13"))
+        .unwrap();
+
+    let recovered = std::fs::read(dest.path().join("$OrphanFiles/OrphanFile-13")).unwrap();
+    assert_eq!(recovered, b"orphaned");
+}
+
+#[test]
+fn deleted_orphan_directory_gets_browsable_subtree_and_recovers() {
+    let mut builder = Ext4ImageBuilder::new(96);
+    builder.write_superblock("orphan-dir");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 4, 20, 1);
+    builder.write_inode_with_extent(13, 0x4000 | 0o755, 4096, 30, 1);
+    builder.write_inode_with_extent(14, 0x8000 | 0o644, 6, 40, 1);
+
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "live.txt")]);
+    builder.write_data(20, b"live");
+    builder.write_dir_entries(30, &[(13, 2, "."), (2, 2, ".."), (14, 1, "hidden.txt")]);
+    builder.write_data(40, b"secret");
+
+    let inode13_off = 3 * 4096 + 12 * 256;
+    builder.write_u16(inode13_off + 26, 0);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let searcher = Searcher::new(&reader);
+    let matches = searcher
+        .search(&report, "hidden", &SearchOptions::default())
+        .unwrap();
+    let hidden_match = matches
+        .iter()
+        .find(|m| m.path == "/$OrphanFiles/OrphanFile-13/hidden.txt")
+        .unwrap();
+    assert!(!hidden_match.deleted);
+    assert_eq!(hidden_match.source, EntrySource::Filesystem);
+    assert_eq!(hidden_match.parent_inode, Some(13));
+
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+    assert!(artifact.filesystems[0]
+        .nodes
+        .iter()
+        .any(|node| node.path == "/$OrphanFiles/OrphanFile-13" && node.file_type == FileType::Directory));
+    assert!(artifact.filesystems[0]
+        .nodes
+        .iter()
+        .any(|node| node.path == "/$OrphanFiles/OrphanFile-13/hidden.txt"));
+
+    let dest = tempfile::TempDir::new().unwrap();
+    let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
+    recoverer
+        .recover_artifact(&artifact, Some("/$OrphanFiles/OrphanFile-13"))
+        .unwrap();
+
+    let recovered = std::fs::read(dest.path().join("$OrphanFiles/OrphanFile-13/hidden.txt")).unwrap();
+    assert_eq!(recovered, b"secret");
+}
+
+#[test]
+fn malformed_directory_record_does_not_hide_later_entries() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("malformed-dir");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 4, 20, 1);
+    builder.write_data(20, b"good");
+
+    let block_off = 10 * 4096;
+    let mut pos = block_off;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 1;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    pos += 12;
+
+    builder.write_u32(pos, 2);
+    builder.write_u16(pos + 4, 12);
+    builder.data[pos + 6] = 2;
+    builder.data[pos + 7] = 2;
+    builder.data[pos + 8] = b'.';
+    builder.data[pos + 9] = b'.';
+    pos += 12;
+
+    // Corrupted record: rec_len = 0 should not stop later entries from being found.
+    builder.write_u32(pos, 999);
+    builder.write_u16(pos + 4, 0);
+    builder.data[pos + 6] = 4;
+    builder.data[pos + 7] = 1;
+    builder.data[pos + 8..pos + 12].copy_from_slice(b"junk");
+
+    let tail_pos = pos + 12;
+    builder.write_u32(tail_pos, 11);
+    builder.write_u16(tail_pos + 4, (4096 - (tail_pos - block_off)) as u16);
+    builder.data[tail_pos + 6] = 4;
+    builder.data[tail_pos + 7] = 1;
+    builder.data[tail_pos + 8..tail_pos + 12].copy_from_slice(b"good");
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let entries = fs.list_directory(2).unwrap();
+    assert!(entries.iter().any(|entry| entry.name == "good"));
+}
+
 // ===========================================================================
 // Directory with very long filenames
 // ===========================================================================
@@ -742,11 +1123,7 @@ fn directory_with_long_filename() {
     builder.write_inode_with_extent(2, 0x4000, 4096, 10, 1);
 
     let long_name = "a".repeat(255); // ext4 max filename length
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 1, &long_name),
-    ]);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, &long_name)]);
 
     let img = builder.build();
     let f = create_test_image(&img);
@@ -776,9 +1153,9 @@ fn read_inode_from_second_block_group() {
     // (65-1) % 64 = 0 → first inode in group
     let inode_off = 100 * 4096; // block 100
     builder.write_u16(inode_off, 0x8000 | 0o644);
-    builder.write_u32(inode_off + 4, 42);  // size
-    builder.write_u16(inode_off + 26, 1);  // links
-    builder.write_u32(inode_off + 32, 0);  // no extents
+    builder.write_u32(inode_off + 4, 42); // size
+    builder.write_u16(inode_off + 26, 1); // links
+    builder.write_u32(inode_off + 32, 0); // no extents
 
     let img = builder.build();
     let f = create_test_image(&img);
@@ -863,7 +1240,7 @@ fn gpt_with_ext4_partition_full_scan() {
     img[sb + 0x28..sb + 0x2C].copy_from_slice(&128u32.to_le_bytes());
     img[sb + 0x38..sb + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
     img[sb + 0x58..sb + 0x5A].copy_from_slice(&256u16.to_le_bytes());
-    img[sb + 0x60..sb + 0x64].copy_from_slice(&0x42u32.to_le_bytes());
+    img[sb + 0x60..sb + 0x64].copy_from_slice(&0xC0u32.to_le_bytes());
     img[sb + 0x68..sb + 0x78].copy_from_slice(&[0xBB; 16]);
     img[sb + 0x78..sb + 0x84].copy_from_slice(b"gpt-ext4-vol");
     img[sb + 0x150..sb + 0x154].copy_from_slice(&0u32.to_le_bytes());
@@ -881,8 +1258,14 @@ fn gpt_with_ext4_partition_full_scan() {
         report.filesystems.len() >= 1,
         "Should find ext4 on the partition"
     );
-    let ext4_fs = report.filesystems.iter().find(|f| f.label == "gpt-ext4-vol");
-    assert!(ext4_fs.is_some(), "Should detect ext4 with label gpt-ext4-vol");
+    let ext4_fs = report
+        .filesystems
+        .iter()
+        .find(|f| f.label == "gpt-ext4-vol");
+    assert!(
+        ext4_fs.is_some(),
+        "Should detect ext4 with label gpt-ext4-vol"
+    );
     assert_eq!(ext4_fs.unwrap().offset, partition_offset);
 }
 
@@ -953,7 +1336,8 @@ fn ext4_with_1k_block_size() {
 
     // Inode #2 (root dir) at block 5, index 1, inode_size=128
     let inode_off = 5 * 1024 + 1 * 128; // inode 2 = index 1
-    img[inode_off] = 0x00; img[inode_off + 1] = 0x41; // mode = 0x4100 (dir)
+    img[inode_off] = 0x00;
+    img[inode_off + 1] = 0x41; // mode = 0x4100 (dir)
     img[inode_off + 4..inode_off + 8].copy_from_slice(&1024u32.to_le_bytes()); // size
     img[inode_off + 26..inode_off + 28].copy_from_slice(&2u16.to_le_bytes()); // links
     img[inode_off + 32..inode_off + 36].copy_from_slice(&0x80000u32.to_le_bytes()); // extents

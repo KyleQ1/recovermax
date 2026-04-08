@@ -1,0 +1,50 @@
+{
+  "id": "ext4-synthetic-basic",
+  "kind": "synthetic",
+  "image": {
+    "path": "testing/fixtures/ext4/synthetic-basic/image.dd",
+    "size_bytes": 8388608,
+    "sha256": "REPLACE_WITH_REAL_SHA256"
+  },
+  "filesystem": {
+    "type": "ext4",
+    "block_size": 4096,
+    "inode_size": 256,
+    "layout": "single-partition-raw",
+    "session_artifact": "testing/fixtures/ext4/synthetic-basic/session.scn"
+  },
+  "expected": {
+    "filesystems": 1,
+    "root_path": "/",
+    "paths": [
+      "/",
+      "/home",
+      "/home/ming",
+      "/home/ming/report.txt",
+      "/data",
+      "/data/ming-link"
+    ],
+    "deleted_paths": [
+      "/home/ming/old-note.txt"
+    ],
+    "recovery": [
+      {
+        "path": "/home/ming/report.txt",
+        "sha256": "REPLACE_WITH_REAL_HASH"
+      }
+    ]
+  },
+  "oracle": {
+    "tools": [
+      "fls",
+      "icat"
+    ],
+    "notes": "Use Sleuth Kit output to verify inode listing and recovered bytes."
+  },
+  "notes": [
+    "Synthetic fixture used as the first golden ext4 session image.",
+    "Keep this image tiny and deterministic.",
+    "Populate the image so the recovered tree is stable across runs."
+  ]
+}
+

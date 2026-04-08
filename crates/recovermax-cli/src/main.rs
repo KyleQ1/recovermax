@@ -1,5 +1,5 @@
 mod cli;
-mod shell;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -13,10 +13,12 @@ use tracing_subscriber::EnvFilter;
     version,
     about = "High-performance data recovery tool",
     long_about = "High-performance data recovery tool.\n\n\
-        Run with just an image path for interactive mode:\n  \
+        Run with no arguments to open the terminal UI image picker:\n  \
+        recovermax\n\n\
+        Open a specific image directly in the terminal UI:\n  \
         recovermax /path/to/image.img\n\n\
         Or use subcommands for scripted/one-shot mode:\n  \
-        recovermax scan /path/to/image.img -o scan.json"
+        recovermax scan /path/to/image.img -o scan.scn"
 )]
 struct TopLevel {
     /// Image path for interactive mode
@@ -39,27 +41,9 @@ fn main() -> Result<()> {
             let wrapped = cli::Args { command: cmd };
             cli::run(wrapped)
         }
-        // Interactive mode: recovermax image.img
-        (None, Some(image)) => {
-            shell::run_interactive(&image)
-        }
-        // No args at all
-        (None, None) => {
-            println!("RecoverMax v{}", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("Interactive mode:");
-            println!("  recovermax <image>              Open image in interactive shell");
-            println!();
-            println!("One-shot commands:");
-            println!("  recovermax info <image>          Show image info");
-            println!("  recovermax scan <image>          Scan for filesystems");
-            println!("  recovermax recover <image> ...   Recover files");
-            println!("  recovermax deleted <image>       Scan for deleted files");
-            println!("  recovermax carve <image> ...     Raw carve by signature");
-            println!("  recovermax hexdump <image> ...   Hex dump region");
-            println!();
-            println!("Run 'recovermax --help' for full usage.");
-            Ok(())
-        }
+        // Interactive mode with explicit image
+        (None, Some(image)) => tui::run_tui(&image, None),
+        // No args at all -> start the TUI image picker
+        (None, None) => tui::run_image_picker(),
     }
 }

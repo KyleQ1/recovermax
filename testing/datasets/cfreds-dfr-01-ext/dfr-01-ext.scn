@@ -1,0 +1,398 @@
+{
+  "version": 2,
+  "source": {
+    "path": "/Users/kylequinlan/Workspace/recovermax/testing/datasets/cfreds-dfr-01-ext/dfr-01-ext.dd",
+    "image_size": 1073742336
+  },
+  "report": {
+    "image_size": 1073742336,
+    "partitions": [
+      {
+        "name": "p1",
+        "offset": 31232,
+        "size": 333401600,
+        "fs_type": "Linux"
+      },
+      {
+        "name": "p2",
+        "offset": 333432832,
+        "size": 333432832,
+        "fs_type": "Linux"
+      },
+      {
+        "name": "p3",
+        "offset": 666865664,
+        "size": 333432832,
+        "fs_type": "Linux"
+      }
+    ],
+    "filesystems": [
+      {
+        "fs_type": "ext4",
+        "label": "ext2",
+        "uuid": "0f18c514-47f9-4a9e-ade1-0d237d141333",
+        "block_size": 1024,
+        "total_size": 333398016,
+        "offset": 31232
+      },
+      {
+        "fs_type": "ext4",
+        "label": "ext3",
+        "uuid": "965a1fb2-f33b-4b82-9a1c-0b51d96988a5",
+        "block_size": 1024,
+        "total_size": 333430784,
+        "offset": 333432832
+      },
+      {
+        "fs_type": "ext4",
+        "label": "ext4",
+        "uuid": "15d39c0e-ad7a-488d-a53a-6e74796b0c41",
+        "block_size": 1024,
+        "total_size": 333430784,
+        "offset": 666865664
+      }
+    ]
+  },
+  "filesystems": [
+    {
+      "filesystem_index": 0,
+      "fs_info": {
+        "fs_type": "ext4",
+        "label": "ext2",
+        "uuid": "0f18c514-47f9-4a9e-ade1-0d237d141333",
+        "block_size": 1024,
+        "total_size": 333398016,
+        "offset": 31232
+      },
+      "root_node_id": 1,
+      "nodes": [
+        {
+          "id": 1,
+          "parent_id": null,
+          "filesystem_index": 0,
+          "inode": 2,
+          "basename": "/",
+          "path": "/",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 1024,
+          "source": "Filesystem",
+          "parent_inode": null,
+          "timestamps": {
+            "created_unix": 1318180379,
+            "modified_unix": 1318180379,
+            "accessed_unix": 1318180379
+          }
+        },
+        {
+          "id": 2,
+          "parent_id": 1,
+          "filesystem_index": 0,
+          "inode": 11,
+          "basename": "lost+found",
+          "path": "/lost+found",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 12288,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318179873,
+            "modified_unix": 1318179873,
+            "accessed_unix": 1318179873
+          }
+        },
+        {
+          "id": 3,
+          "parent_id": 1,
+          "filesystem_index": 0,
+          "inode": 12,
+          "basename": "Algol.txt",
+          "path": "/Algol.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180219,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        },
+        {
+          "id": 4,
+          "parent_id": 1,
+          "filesystem_index": 0,
+          "inode": null,
+          "basename": "Bellatrix.txt",
+          "path": "/Bellatrix.txt",
+          "file_type": "RegularFile",
+          "deleted": true,
+          "size": null,
+          "source": "DeletedSlack",
+          "parent_inode": 2,
+          "timestamps": null
+        },
+        {
+          "id": 5,
+          "parent_id": 1,
+          "filesystem_index": 0,
+          "inode": 14,
+          "basename": "Canopus.txt",
+          "path": "/Canopus.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180219,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        },
+        {
+          "id": 6,
+          "parent_id": 1,
+          "filesystem_index": 0,
+          "inode": null,
+          "basename": "$OrphanFiles",
+          "path": "/$OrphanFiles",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": null,
+          "source": "SyntheticOrphan",
+          "parent_inode": null,
+          "timestamps": null
+        },
+        {
+          "id": 7,
+          "parent_id": 6,
+          "filesystem_index": 0,
+          "inode": 13,
+          "basename": "OrphanFile-13",
+          "path": "/$OrphanFiles/OrphanFile-13",
+          "file_type": "RegularFile",
+          "deleted": true,
+          "size": 712,
+          "source": "SyntheticOrphan",
+          "parent_inode": null,
+          "timestamps": {
+            "created_unix": 1318180379,
+            "modified_unix": 951847980,
+            "accessed_unix": 915264180
+          }
+        }
+      ]
+    },
+    {
+      "filesystem_index": 1,
+      "fs_info": {
+        "fs_type": "ext4",
+        "label": "ext3",
+        "uuid": "965a1fb2-f33b-4b82-9a1c-0b51d96988a5",
+        "block_size": 1024,
+        "total_size": 333430784,
+        "offset": 333432832
+      },
+      "root_node_id": 8,
+      "nodes": [
+        {
+          "id": 8,
+          "parent_id": null,
+          "filesystem_index": 1,
+          "inode": 2,
+          "basename": "/",
+          "path": "/",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 1024,
+          "source": "Filesystem",
+          "parent_inode": null,
+          "timestamps": {
+            "created_unix": 1318180380,
+            "modified_unix": 1318180380,
+            "accessed_unix": 1318180380
+          }
+        },
+        {
+          "id": 9,
+          "parent_id": 8,
+          "filesystem_index": 1,
+          "inode": 11,
+          "basename": "lost+found",
+          "path": "/lost+found",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 12288,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318179894,
+            "modified_unix": 1318179894,
+            "accessed_unix": 1318179894
+          }
+        },
+        {
+          "id": 10,
+          "parent_id": 8,
+          "filesystem_index": 1,
+          "inode": 12,
+          "basename": "Arcturus.txt",
+          "path": "/Arcturus.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180220,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        },
+        {
+          "id": 11,
+          "parent_id": 8,
+          "filesystem_index": 1,
+          "inode": 13,
+          "basename": "Bunda.txt",
+          "path": "/Bunda.txt",
+          "file_type": "RegularFile",
+          "deleted": true,
+          "size": 0,
+          "source": "DeletedSlack",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180380,
+            "modified_unix": 1318180380,
+            "accessed_unix": 915264240
+          }
+        },
+        {
+          "id": 12,
+          "parent_id": 8,
+          "filesystem_index": 1,
+          "inode": 14,
+          "basename": "Castor.txt",
+          "path": "/Castor.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180220,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        }
+      ]
+    },
+    {
+      "filesystem_index": 2,
+      "fs_info": {
+        "fs_type": "ext4",
+        "label": "ext4",
+        "uuid": "15d39c0e-ad7a-488d-a53a-6e74796b0c41",
+        "block_size": 1024,
+        "total_size": 333430784,
+        "offset": 666865664
+      },
+      "root_node_id": 13,
+      "nodes": [
+        {
+          "id": 13,
+          "parent_id": null,
+          "filesystem_index": 2,
+          "inode": 2,
+          "basename": "/",
+          "path": "/",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 1024,
+          "source": "Filesystem",
+          "parent_inode": null,
+          "timestamps": {
+            "created_unix": 1318180380,
+            "modified_unix": 1318180380,
+            "accessed_unix": 1318180380
+          }
+        },
+        {
+          "id": 14,
+          "parent_id": 13,
+          "filesystem_index": 2,
+          "inode": 11,
+          "basename": "lost+found",
+          "path": "/lost+found",
+          "file_type": "Directory",
+          "deleted": false,
+          "size": 12288,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318179916,
+            "modified_unix": 1318179916,
+            "accessed_unix": 1318179916
+          }
+        },
+        {
+          "id": 15,
+          "parent_id": 13,
+          "filesystem_index": 2,
+          "inode": 12,
+          "basename": "Antares.txt",
+          "path": "/Antares.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180220,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        },
+        {
+          "id": 16,
+          "parent_id": 13,
+          "filesystem_index": 2,
+          "inode": 13,
+          "basename": "Botein.txt",
+          "path": "/Botein.txt",
+          "file_type": "RegularFile",
+          "deleted": true,
+          "size": 0,
+          "source": "DeletedSlack",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180380,
+            "modified_unix": 1318180380,
+            "accessed_unix": 915264300
+          }
+        },
+        {
+          "id": 17,
+          "parent_id": 13,
+          "filesystem_index": 2,
+          "inode": 14,
+          "basename": "Chort.txt",
+          "path": "/Chort.txt",
+          "file_type": "RegularFile",
+          "deleted": false,
+          "size": 512,
+          "source": "Filesystem",
+          "parent_inode": 2,
+          "timestamps": {
+            "created_unix": 1318180220,
+            "modified_unix": 915170460,
+            "accessed_unix": 915170460
+          }
+        }
+      ]
+    }
+  ]
+}

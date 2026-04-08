@@ -1,10 +1,10 @@
 //! Tests that are EXPECTED TO FAIL — they expose real bugs and missing features.
 //! As we fix each issue, move the test to the appropriate passing test file.
 
+use recovermax_core::fs::ext4::Ext4Fs;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use recovermax_core::io::ImageReader;
-use recovermax_core::fs::ext4::Ext4Fs;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -25,7 +25,13 @@ impl Ext4ImageBuilder {
     fn new(size_blocks: u64) -> Self {
         let block_size = 4096u32;
         let data = vec![0u8; (size_blocks * block_size as u64) as usize];
-        Self { data, block_size, inode_size: 256, inode_table_block: 3, inodes_per_group: 256 }
+        Self {
+            data,
+            block_size,
+            inode_size: 256,
+            inode_table_block: 3,
+            inodes_per_group: 256,
+        }
     }
 
     fn write_superblock(&mut self, label: &str) {
@@ -56,9 +62,17 @@ impl Ext4ImageBuilder {
         self.write_u32(off + 40, (inode_table_block >> 32) as u32);
     }
 
-    fn write_inode_with_extent(&mut self, inode_num: u64, mode: u16, size: u64, data_block: u64, block_count: u16) {
+    fn write_inode_with_extent(
+        &mut self,
+        inode_num: u64,
+        mode: u16,
+        size: u64,
+        data_block: u64,
+        block_count: u16,
+    ) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
-        let off = self.inode_table_block as usize * self.block_size as usize + index as usize * self.inode_size as usize;
+        let off = self.inode_table_block as usize * self.block_size as usize
+            + index as usize * self.inode_size as usize;
         self.write_u16(off, mode);
         self.write_u32(off + 4, size as u32);
         self.write_u32(off + 108, (size >> 32) as u32);
@@ -77,7 +91,8 @@ impl Ext4ImageBuilder {
 
     fn write_inode_with_blockmap(&mut self, inode_num: u64, mode: u16, size: u64, blocks: &[u32]) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
-        let off = self.inode_table_block as usize * self.block_size as usize + index as usize * self.inode_size as usize;
+        let off = self.inode_table_block as usize * self.block_size as usize
+            + index as usize * self.inode_size as usize;
         self.write_u16(off, mode);
         self.write_u32(off + 4, size as u32);
         self.write_u32(off + 108, (size >> 32) as u32);
@@ -122,7 +137,9 @@ impl Ext4ImageBuilder {
         self.data[off..off + 4].copy_from_slice(&val.to_le_bytes());
     }
 
-    fn build(self) -> Vec<u8> { self.data }
+    fn build(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 // ===========================================================================
@@ -178,12 +195,19 @@ fn indirect_blocks_work() {
     for i in 0..12 {
         assert!(
             data[i * 4096..(i + 1) * 4096].iter().all(|&b| b == i as u8),
-            "Direct block {} wrong", i
+            "Direct block {} wrong",
+            i
         );
     }
     // Verify indirect blocks
-    assert!(data[12 * 4096..13 * 4096].iter().all(|&b| b == 0xAA), "Indirect block 0 wrong");
-    assert!(data[13 * 4096..14 * 4096].iter().all(|&b| b == 0xBB), "Indirect block 1 wrong");
+    assert!(
+        data[12 * 4096..13 * 4096].iter().all(|&b| b == 0xAA),
+        "Indirect block 0 wrong"
+    );
+    assert!(
+        data[13 * 4096..14 * 4096].iter().all(|&b| b == 0xBB),
+        "Indirect block 1 wrong"
+    );
 }
 
 // ===========================================================================
@@ -212,11 +236,17 @@ fn sparse_file_with_holes() {
 
     assert_eq!(data.len(), file_size);
     // First block is a hole — should be all zeros
-    assert!(data[0..4096].iter().all(|&b| b == 0), "Hole should be zeros");
+    assert!(
+        data[0..4096].iter().all(|&b| b == 0),
+        "Hole should be zeros"
+    );
     // Second block has data
     assert!(data[4096..8192].iter().all(|&b| b == 0xAA), "Block 2 wrong");
     // Third block has data
-    assert!(data[8192..12288].iter().all(|&b| b == 0xBB), "Block 3 wrong");
+    assert!(
+        data[8192..12288].iter().all(|&b| b == 0xBB),
+        "Block 3 wrong"
+    );
 }
 
 // ===========================================================================
@@ -230,12 +260,15 @@ fn symlink_recovery() {
     builder.write_block_group_descriptor(0, 3);
 
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 1, "target.txt"),
-        (12, 7, "link.txt"),  // type 7 = symlink
-    ]);
+    builder.write_dir_entries(
+        10,
+        &[
+            (2, 2, "."),
+            (2, 2, ".."),
+            (11, 1, "target.txt"),
+            (12, 7, "link.txt"), // type 7 = symlink
+        ],
+    );
 
     // target file
     builder.write_inode_with_extent(11, 0x8000, 5, 20, 1);
@@ -249,7 +282,7 @@ fn symlink_recovery() {
     builder.write_u32(off + 4, link_target.len() as u32);
     builder.write_u16(off + 26, 1);
     builder.write_u32(off + 32, 0); // no extents for inline symlink
-    // Target stored inline in block_data area
+                                    // Target stored inline in block_data area
     builder.data[off + 40..off + 40 + link_target.len()].copy_from_slice(link_target);
 
     let img = builder.build();
@@ -293,7 +326,7 @@ fn large_file_size_field_parsing() {
     builder.write_u16(off, 0x8000);
     // size = 5GB = 5 * 1024^3 = 5368709120
     let size: u64 = 5 * 1024 * 1024 * 1024;
-    builder.write_u32(off + 4, size as u32);           // size_lo
+    builder.write_u32(off + 4, size as u32); // size_lo
     builder.write_u32(off + 108, (size >> 32) as u32); // size_hi
     builder.write_u16(off + 26, 1);
     builder.write_u32(off + 32, 0x80000); // extents
@@ -327,7 +360,10 @@ fn large_file_size_field_parsing() {
         Ok(data) => {
             // If it succeeds, it should have truncated to available data
             // BUG: it tries to allocate 5GB then truncate, which may OOM
-            assert!(data.len() <= 4096, "Should not have more data than the 1 extent block");
+            assert!(
+                data.len() <= 4096,
+                "Should not have more data than the 1 extent block"
+            );
         }
         Err(_) => {
             // OOM or read error — acceptable for now but should be fixed
@@ -357,23 +393,27 @@ fn recovery_respects_depth_limit() {
         let dir_block = 10 + i as u64;
         let name = if i == 0 { "a" } else { "sub" };
 
-        builder.write_inode_with_extent(
-            inode_num as u64, 0x4000 | 0o755, 4096, dir_block, 1
-        );
+        builder.write_inode_with_extent(inode_num as u64, 0x4000 | 0o755, 4096, dir_block, 1);
 
         if i < depth - 1 {
-            builder.write_dir_entries(dir_block, &[
-                (inode_num, 2, "."),
-                (if i == 0 { root_inode } else { inode_num - 1 }, 2, ".."),
-                (next_inode, 2, name),
-            ]);
+            builder.write_dir_entries(
+                dir_block,
+                &[
+                    (inode_num, 2, "."),
+                    (if i == 0 { root_inode } else { inode_num - 1 }, 2, ".."),
+                    (next_inode, 2, name),
+                ],
+            );
         } else {
             // Leaf directory with a file
-            builder.write_dir_entries(dir_block, &[
-                (inode_num, 2, "."),
-                (inode_num - 1, 2, ".."),
-                (200, 1, "deep.txt"),
-            ]);
+            builder.write_dir_entries(
+                dir_block,
+                &[
+                    (inode_num, 2, "."),
+                    (inode_num - 1, 2, ".."),
+                    (200, 1, "deep.txt"),
+                ],
+            );
             builder.write_inode_with_extent(200, 0x8000, 4, 100, 1);
             builder.write_data(100, b"deep");
         }
@@ -390,7 +430,10 @@ fn recovery_respects_depth_limit() {
 
     // Should not crash or stack overflow — depth limit should kick in
     let result = recoverer.recover(&report, None);
-    assert!(result.is_ok(), "Recovery should handle deep nesting gracefully");
+    assert!(
+        result.is_ok(),
+        "Recovery should handle deep nesting gracefully"
+    );
 }
 
 // ===========================================================================
@@ -406,14 +449,20 @@ fn carver_finds_embedded_headers() {
     let mut img = vec![0u8; 16384];
 
     // JPEG starting at sector 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
     // Real footer at offset 4000
-    img[4000] = 0xFF; img[4001] = 0xD9;
+    img[4000] = 0xFF;
+    img[4001] = 0xD9;
 
     // Another JPEG header at sector 2 (offset 1024) — INSIDE the first JPEG
-    img[1024] = 0xFF; img[1025] = 0xD8; img[1026] = 0xFF;
+    img[1024] = 0xFF;
+    img[1025] = 0xD8;
+    img[1026] = 0xFF;
     // This embedded header has its own "footer" at 1500
-    img[1500] = 0xFF; img[1501] = 0xD9;
+    img[1500] = 0xFF;
+    img[1501] = 0xD9;
 
     let img_file = create_test_image(&img);
     let dest = TempDir::new().unwrap();
@@ -429,7 +478,8 @@ fn carver_finds_embedded_headers() {
     // BUG: finds 2 JPEGs because it doesn't skip past the first one.
     // Ideally it should find 1 (the outer one) and skip the embedded header.
     assert_eq!(
-        files.len(), 2,
+        files.len(),
+        2,
         "Current impl finds embedded headers as separate files (known limitation)"
     );
 }
@@ -446,21 +496,20 @@ fn recovery_continues_after_corrupt_directory() {
     builder.write_block_group_descriptor(0, 3);
 
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
-    builder.write_dir_entries(10, &[
-        (2, 2, "."),
-        (2, 2, ".."),
-        (11, 2, "good_dir"),
-        (12, 2, "bad_dir"),
-        (13, 1, "root_file.txt"),
-    ]);
+    builder.write_dir_entries(
+        10,
+        &[
+            (2, 2, "."),
+            (2, 2, ".."),
+            (11, 2, "good_dir"),
+            (12, 2, "bad_dir"),
+            (13, 1, "root_file.txt"),
+        ],
+    );
 
     // good_dir: valid
     builder.write_inode_with_extent(11, 0x4000, 4096, 20, 1);
-    builder.write_dir_entries(20, &[
-        (11, 2, "."),
-        (2, 2, ".."),
-        (14, 1, "good.txt"),
-    ]);
+    builder.write_dir_entries(20, &[(11, 2, "."), (2, 2, ".."), (14, 1, "good.txt")]);
     builder.write_inode_with_extent(14, 0x8000, 4, 30, 1);
     builder.write_data(30, b"good");
 
@@ -487,11 +536,17 @@ fn recovery_continues_after_corrupt_directory() {
     let dest = TempDir::new().unwrap();
     let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
     let result = recoverer.recover(&report, None);
-    assert!(result.is_ok(), "Recovery should not abort on corrupt directory");
+    assert!(
+        result.is_ok(),
+        "Recovery should not abort on corrupt directory"
+    );
 
     // good_dir/good.txt should still be recovered
     let good_path = dest.path().join("good_dir/good.txt");
-    assert!(good_path.exists(), "good.txt should be recovered despite bad_dir failing");
+    assert!(
+        good_path.exists(),
+        "good.txt should be recovered despite bad_dir failing"
+    );
     assert_eq!(std::fs::read(&good_path).unwrap(), b"good");
 
     // root_file.txt should also be recovered

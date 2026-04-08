@@ -1,7 +1,7 @@
+use recovermax_core::fs::ext4;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use recovermax_core::io::ImageReader;
-use recovermax_core::fs::ext4;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -14,18 +14,18 @@ fn build_ext4_image(label: &str, log_block_size: u32, blocks: u32, incompat: u32
     let mut img = vec![0u8; 4 * 1024 * 1024];
     let sb = 1024usize;
 
-    img[sb..sb + 4].copy_from_slice(&256u32.to_le_bytes());       // inodes_count
+    img[sb..sb + 4].copy_from_slice(&256u32.to_le_bytes()); // inodes_count
     img[sb + 0x04..sb + 0x08].copy_from_slice(&blocks.to_le_bytes()); // blocks_count_lo
     img[sb + 0x0C..sb + 0x10].copy_from_slice(&(blocks / 2).to_le_bytes()); // free_blocks_lo
     img[sb + 0x10..sb + 0x14].copy_from_slice(&128u32.to_le_bytes()); // free_inodes_count
-    img[sb + 0x14..sb + 0x18].copy_from_slice(&1u32.to_le_bytes());   // first_data_block
+    img[sb + 0x14..sb + 0x18].copy_from_slice(&1u32.to_le_bytes()); // first_data_block
     img[sb + 0x18..sb + 0x1C].copy_from_slice(&log_block_size.to_le_bytes());
     img[sb + 0x20..sb + 0x24].copy_from_slice(&8192u32.to_le_bytes()); // blocks_per_group
     img[sb + 0x28..sb + 0x2C].copy_from_slice(&256u32.to_le_bytes()); // inodes_per_group
     img[sb + 0x38..sb + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes()); // magic
-    img[sb + 0x58..sb + 0x5A].copy_from_slice(&256u16.to_le_bytes());    // inode_size
+    img[sb + 0x58..sb + 0x5A].copy_from_slice(&256u16.to_le_bytes()); // inode_size
     img[sb + 0x60..sb + 0x64].copy_from_slice(&incompat.to_le_bytes()); // feature_incompat
-    img[sb + 0x68..sb + 0x78].copy_from_slice(&[0xAA; 16]);            // UUID
+    img[sb + 0x68..sb + 0x78].copy_from_slice(&[0xAA; 16]); // UUID
     let name = label.as_bytes();
     let len = name.len().min(16);
     img[sb + 0x78..sb + 0x78 + len].copy_from_slice(&name[..len]);
@@ -148,7 +148,7 @@ fn no_extents_flag() {
 
 #[test]
 fn has_64bit_flag() {
-    let img = build_ext4_image("64b", 2, 512, 0x02);
+    let img = build_ext4_image("64b", 2, 512, 0x80);
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
     let sb = ext4::parse_superblock(&reader, 0).unwrap();
@@ -222,7 +222,7 @@ fn max_length_volume_name() {
 
 #[test]
 fn ext4fs_new_valid() {
-    let img = build_ext4_image("fstest", 2, 1024, 0x42);
+    let img = build_ext4_image("fstest", 2, 1024, 0xC0);
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
     let fs = ext4::Ext4Fs::new(&reader, 0).unwrap();
@@ -239,7 +239,7 @@ fn ext4fs_new_invalid() {
 
 #[test]
 fn read_inode_zero_is_error() {
-    let img = build_ext4_image("inodetest", 2, 1024, 0x42);
+    let img = build_ext4_image("inodetest", 2, 1024, 0xC0);
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
     let fs = ext4::Ext4Fs::new(&reader, 0).unwrap();
@@ -261,6 +261,9 @@ fn inode_type_detection() {
         links_count: 2,
         flags: 0,
         dtime: 0,
+        ctime: 0,
+        mtime: 0,
+        atime: 0,
         block_data: [0; 60],
     };
     assert!(inode.is_directory());
@@ -295,6 +298,9 @@ fn inode_deleted_detection() {
         links_count: 1,
         flags: 0,
         dtime: 0,
+        ctime: 0,
+        mtime: 0,
+        atime: 0,
         block_data: [0; 60],
     };
 
@@ -302,11 +308,17 @@ fn inode_deleted_detection() {
     assert!(!base.is_deleted());
 
     // Deleted by dtime
-    let deleted = ext4::Inode { dtime: 1234567890, ..base };
+    let deleted = ext4::Inode {
+        dtime: 1234567890,
+        ..base
+    };
     assert!(deleted.is_deleted());
 
     // Deleted by zero links
-    let deleted = ext4::Inode { links_count: 0, ..base };
+    let deleted = ext4::Inode {
+        links_count: 0,
+        ..base
+    };
     assert!(deleted.is_deleted());
 }
 
@@ -319,11 +331,17 @@ fn inode_uses_extents() {
         links_count: 1,
         flags: 0,
         dtime: 0,
+        ctime: 0,
+        mtime: 0,
+        atime: 0,
         block_data: [0; 60],
     };
 
     assert!(!base.uses_extents());
 
-    let with_extents = ext4::Inode { flags: 0x80000, ..base };
+    let with_extents = ext4::Inode {
+        flags: 0x80000,
+        ..base
+    };
     assert!(with_extents.uses_extents());
 }

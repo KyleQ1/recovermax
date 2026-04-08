@@ -1,0 +1,72 @@
+{
+  "id": "cfreds-dfr-01-ext",
+  "kind": "public-corpus",
+  "source": {
+    "name": "CFReDS DFR Test Images",
+    "url": "https://cfreds-archive.nist.gov/dfr-test-images.html"
+  },
+  "image": {
+    "path": "testing/datasets/cfreds-dfr-01-ext/dfr-01-ext.dd",
+    "compressed_path": "testing/datasets/cfreds-dfr-01-ext/dfr-01-ext.dd.bz2",
+    "size_bytes": 1073742336,
+    "sha256": "855e7dfdc3a807beae3dadd519243f1c047d9a7bd2c08a4e70e7a8eda8f75901",
+    "compressed_sha256": "1f98fc96dfc8fe8ae53f51be391f47fcb08065d9f94aafbaa9d6d479382b0cea"
+  },
+  "filesystem": {
+    "layout": "MBR",
+    "partitions": 3,
+    "types": [
+      "ext2",
+      "ext3",
+      "ext4"
+    ]
+  },
+  "expected": {
+    "scan": {
+      "filesystems": 3,
+      "session_saved": true,
+      "session_mode": "tree-backed"
+    },
+    "browsing": {
+      "tree_materialization": "available",
+      "live_fallback": true
+    },
+    "deleted_search": {
+      "filesystem_0": [
+        "Bellatrix.txt"
+      ],
+      "filesystem_1": [
+        "Bunda.txt"
+      ],
+      "filesystem_2": [
+        "Botein.txt"
+      ]
+    },
+    "deleted_recovery": {
+      "status": "partially_validated",
+      "notes": [
+        "Deleted root-entry names are surfaced in tree and search.",
+        "filesystem_0 Bellatrix.txt is preserved as deleted-slack under parent inode 2 and now auto-resolves to the unique orphan candidate /$OrphanFiles/OrphanFile-13 during path-based recovery.",
+        "filesystem_0 exposes /$OrphanFiles/OrphanFile-13, which recovers 712 bytes locally and matches the deleted inode scan.",
+        "filesystem_1 Bunda.txt and filesystem_2 Botein.txt resolve to deleted inodes, but Sleuth Kit reports both as size 0."
+      ]
+    }
+  },
+  "oracle": {
+    "tools": [
+      "mmls",
+      "fls",
+      "istat"
+    ]
+  },
+  "notes": [
+    "Observed locally: scan identifies three filesystems and the saved session reopens with tree-backed browsing on all three partitions.",
+    "Observed locally: ls/tree/stat/search/recover work against the saved session for visible paths such as /Algol.txt on filesystem 0.",
+    "Observed locally: deleted root entries are surfaced from all three partitions: Bellatrix.txt, Bunda.txt, and Botein.txt.",
+    "Observed locally: reopened sessions preserve deleted-entry provenance; on filesystem 0, Bellatrix.txt is reported as deleted-slack with parent inode 2.",
+    "Observed locally: recover -p /Bellatrix.txt now auto-resolves the unique orphan candidate and yields the same 712-byte output as /$OrphanFiles/OrphanFile-13.",
+    "Observed locally: ext2 also exposes /$OrphanFiles/OrphanFile-13, and recovering that orphan path yields 712 bytes.",
+    "Observed locally: deleted-path recovery is explicit but only partially validated on this corpus because Bellatrix is residual-only and Bunda/Botein are zero-length deleted inodes.",
+    "Keep the .dd and .scn files together with this manifest and notes file."
+  ]
+}

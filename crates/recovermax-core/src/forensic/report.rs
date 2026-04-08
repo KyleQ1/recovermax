@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use chrono::Utc;
 
-use super::audit::{AuditLog, AuditAction};
+use super::audit::{AuditAction, AuditLog};
 
 /// Recovered file entry for the report
 #[derive(Debug, Clone)]
@@ -43,15 +43,33 @@ impl ForensicReport {
         for entry in &audit_log.entries {
             let desc = match &entry.action {
                 AuditAction::ImageOpened { path, size, sha256 } => {
-                    format!("Opened image: {} ({} bytes, SHA-256: {})",
-                        path, size, sha256.as_deref().unwrap_or("not computed"))
+                    format!(
+                        "Opened image: {} ({} bytes, SHA-256: {})",
+                        path,
+                        size,
+                        sha256.as_deref().unwrap_or("not computed")
+                    )
                 }
                 AuditAction::ScanStarted => "Scan started".into(),
-                AuditAction::ScanCompleted { partitions, filesystems } => {
-                    format!("Scan completed: {} partitions, {} filesystems", partitions, filesystems)
+                AuditAction::ScanCompleted {
+                    partitions,
+                    filesystems,
+                } => {
+                    format!(
+                        "Scan completed: {} partitions, {} filesystems",
+                        partitions, filesystems
+                    )
                 }
-                AuditAction::FileRecovered { inode, path, size, sha256 } => {
-                    format!("Recovered file: {} (inode {}, {} bytes, SHA-256: {})", path, inode, size, sha256)
+                AuditAction::FileRecovered {
+                    inode,
+                    path,
+                    size,
+                    sha256,
+                } => {
+                    format!(
+                        "Recovered file: {} (inode {}, {} bytes, SHA-256: {})",
+                        path, inode, size, sha256
+                    )
                 }
                 AuditAction::DirectoryRecovered { path, file_count } => {
                     format!("Recovered directory: {} ({} files)", path, file_count)
@@ -66,8 +84,11 @@ impl ForensicReport {
                     format!("Deleted inode scan: {} deleted inodes found", deleted_count)
                 }
                 AuditAction::ImageVerified { sha256, matched } => {
-                    format!("Image verification: SHA-256 {} — {}",
-                        sha256, if *matched { "MATCH" } else { "MISMATCH" })
+                    format!(
+                        "Image verification: SHA-256 {} — {}",
+                        sha256,
+                        if *matched { "MATCH" } else { "MISMATCH" }
+                    )
                 }
                 AuditAction::Error { message } => {
                     format!("Error: {}", message)
@@ -92,7 +113,8 @@ impl ForensicReport {
             ));
         }
 
-        format!(r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -178,7 +200,7 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forensic::audit::{AuditLog, AuditAction, CaseInfo};
+    use crate::forensic::audit::{AuditAction, AuditLog, CaseInfo};
 
     fn test_log() -> AuditLog {
         let mut log = AuditLog::new(CaseInfo {
@@ -192,20 +214,21 @@ mod tests {
             size: 2_730_000_000_000,
             sha256: Some("abcdef1234567890".into()),
         });
-        log.log(AuditAction::ScanCompleted { partitions: 3, filesystems: 2 });
+        log.log(AuditAction::ScanCompleted {
+            partitions: 3,
+            filesystems: 2,
+        });
         log
     }
 
     #[test]
     fn test_report_generation() {
         let log = test_log();
-        let files = vec![
-            RecoveredFile {
-                path: "/home/user/document.pdf".into(),
-                size: 45000,
-                sha256: "deadbeef".into(),
-            },
-        ];
+        let files = vec![RecoveredFile {
+            path: "/home/user/document.pdf".into(),
+            size: 45000,
+            sha256: "deadbeef".into(),
+        }];
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("report.html");
@@ -222,8 +245,10 @@ mod tests {
 
     #[test]
     fn test_html_escape() {
-        assert_eq!(html_escape("<script>alert('xss')</script>"),
-            "&lt;script&gt;alert('xss')&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+        );
     }
 
     #[test]

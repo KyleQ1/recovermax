@@ -129,13 +129,18 @@ impl<'a> Carver<'a> {
             return Ok(());
         }
 
-        println!("Carving for: {}", sigs.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
+        println!(
+            "Carving for: {}",
+            sigs.iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
+        );
 
         let image_size = self.reader.len();
         let pb = ProgressBar::new(image_size);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:50.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+                .template(
+                    "{spinner:.green} [{bar:50.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}",
+                )
                 .unwrap()
                 .progress_chars("=>-"),
         );
@@ -149,15 +154,17 @@ impl<'a> Carver<'a> {
             for sig in &sigs {
                 if data[offset..].starts_with(sig.header) {
                     if let Some(carved) = self.extract_file(data, offset, sig) {
-                        let filename = format!(
-                            "{:012x}.{}",
-                            offset, sig.extension
-                        );
+                        let filename = format!("{:012x}.{}", offset, sig.extension);
                         let path = self.dest.join(&filename);
                         std::fs::write(&path, carved)?;
                         found_count += 1;
                         pb.set_message(format!("Found {} files", found_count));
-                        tracing::info!("Carved {} at offset 0x{:x} ({} bytes)", sig.name, offset, carved.len());
+                        tracing::info!(
+                            "Carved {} at offset 0x{:x} ({} bytes)",
+                            sig.name,
+                            offset,
+                            carved.len()
+                        );
                     }
                 }
             }
@@ -223,7 +230,11 @@ impl<'a> Carver<'a> {
 
         let page_size_raw = u16::from_be_bytes([data[start + 16], data[start + 17]]);
         // SQLite uses 0 to mean 65536
-        let page_size = if page_size_raw == 0 { 65536u64 } else { page_size_raw as u64 };
+        let page_size = if page_size_raw == 0 {
+            65536u64
+        } else {
+            page_size_raw as u64
+        };
 
         // page_size must be a power of 2 between 512 and 65536
         if page_size < 512 || (page_size & (page_size - 1)) != 0 {
@@ -231,7 +242,10 @@ impl<'a> Carver<'a> {
         }
 
         let page_count = u32::from_be_bytes([
-            data[start + 28], data[start + 29], data[start + 30], data[start + 31],
+            data[start + 28],
+            data[start + 29],
+            data[start + 30],
+            data[start + 31],
         ]) as u64;
 
         if page_count == 0 {
@@ -253,7 +267,7 @@ impl<'a> Carver<'a> {
         }
 
         let ei_class = data[start + 4]; // 1 = 32-bit, 2 = 64-bit
-        let ei_data = data[start + 5];  // 1 = little-endian, 2 = big-endian
+        let ei_data = data[start + 5]; // 1 = little-endian, 2 = big-endian
 
         match (ei_class, ei_data) {
             (1, 1) => self.extract_elf32_le(data, start, max_end),
@@ -264,7 +278,12 @@ impl<'a> Carver<'a> {
         }
     }
 
-    fn extract_elf32_le<'b>(&self, data: &'b [u8], start: usize, max_end: usize) -> Option<&'b [u8]> {
+    fn extract_elf32_le<'b>(
+        &self,
+        data: &'b [u8],
+        start: usize,
+        max_end: usize,
+    ) -> Option<&'b [u8]> {
         // 32-bit ELF header is 52 bytes
         if start + 52 > data.len() {
             return Some(&data[start..max_end]);
@@ -276,7 +295,12 @@ impl<'a> Carver<'a> {
         self.elf_size_from_sections(data, start, max_end, e_shoff, e_shentsize, e_shnum)
     }
 
-    fn extract_elf32_be<'b>(&self, data: &'b [u8], start: usize, max_end: usize) -> Option<&'b [u8]> {
+    fn extract_elf32_be<'b>(
+        &self,
+        data: &'b [u8],
+        start: usize,
+        max_end: usize,
+    ) -> Option<&'b [u8]> {
         if start + 52 > data.len() {
             return Some(&data[start..max_end]);
         }
@@ -287,7 +311,12 @@ impl<'a> Carver<'a> {
         self.elf_size_from_sections(data, start, max_end, e_shoff, e_shentsize, e_shnum)
     }
 
-    fn extract_elf64_le<'b>(&self, data: &'b [u8], start: usize, max_end: usize) -> Option<&'b [u8]> {
+    fn extract_elf64_le<'b>(
+        &self,
+        data: &'b [u8],
+        start: usize,
+        max_end: usize,
+    ) -> Option<&'b [u8]> {
         // 64-bit ELF header is 64 bytes
         if start + 64 > data.len() {
             return Some(&data[start..max_end]);
@@ -299,7 +328,12 @@ impl<'a> Carver<'a> {
         self.elf_size_from_sections(data, start, max_end, e_shoff, e_shentsize, e_shnum)
     }
 
-    fn extract_elf64_be<'b>(&self, data: &'b [u8], start: usize, max_end: usize) -> Option<&'b [u8]> {
+    fn extract_elf64_be<'b>(
+        &self,
+        data: &'b [u8],
+        start: usize,
+        max_end: usize,
+    ) -> Option<&'b [u8]> {
         if start + 64 > data.len() {
             return Some(&data[start..max_end]);
         }

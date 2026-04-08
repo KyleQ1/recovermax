@@ -4,11 +4,11 @@
 //! links_count=0 but valid size and extent data, then verifies
 //! scan_deleted_inodes finds them and the data can be read back.
 
-use std::io::Write;
-use tempfile::NamedTempFile;
 use recovermax_core::fs::ext4::Ext4Fs;
 use recovermax_core::fs::FileType;
 use recovermax_core::io::ImageReader;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -47,17 +47,19 @@ impl TestBuilder {
         let blocks = (self.data.len() / 4096) as u32;
 
         self.put_u32(sb + 0x00, self.inodes_per_group); // inodes_count
-        self.put_u32(sb + 0x04, blocks);                 // blocks_count_lo
-        self.put_u32(sb + 0x0C, blocks / 2);             // free_blocks_lo
+        self.put_u32(sb + 0x04, blocks); // blocks_count_lo
+        self.put_u32(sb + 0x0C, blocks / 2); // free_blocks_lo
         self.put_u32(sb + 0x10, self.inodes_per_group / 2); // free_inodes_count
-        self.put_u32(sb + 0x14, 0);                      // first_data_block (0 for 4K)
-        self.put_u32(sb + 0x18, 2);                      // log_block_size (1024<<2 = 4096)
-        self.put_u32(sb + 0x20, 8192);                   // blocks_per_group
-        self.put_u32(sb + 0x28, self.inodes_per_group);  // inodes_per_group
-        self.put_u16(sb + 0x38, 0xEF53);                 // magic
-        self.put_u16(sb + 0x58, self.inode_size);         // inode_size
-        self.put_u32(sb + 0x60, 0x42);                   // feature_incompat: extents + 64bit
-        for i in 0..16 { self.data[sb + 0x68 + i] = (i + 1) as u8; } // UUID
+        self.put_u32(sb + 0x14, 0); // first_data_block (0 for 4K)
+        self.put_u32(sb + 0x18, 2); // log_block_size (1024<<2 = 4096)
+        self.put_u32(sb + 0x20, 8192); // blocks_per_group
+        self.put_u32(sb + 0x28, self.inodes_per_group); // inodes_per_group
+        self.put_u16(sb + 0x38, 0xEF53); // magic
+        self.put_u16(sb + 0x58, self.inode_size); // inode_size
+        self.put_u32(sb + 0x60, 0x42); // feature_incompat: extents + 64bit
+        for i in 0..16 {
+            self.data[sb + 0x68 + i] = (i + 1) as u8;
+        } // UUID
         let name = label.as_bytes();
         let len = name.len().min(16);
         self.data[sb + 0x78..sb + 0x78 + len].copy_from_slice(&name[..len]);
@@ -71,17 +73,39 @@ impl TestBuilder {
     }
 
     /// Write a live (non-deleted) inode with extent pointing to data_block.
-    fn write_live_inode(&mut self, inode_num: u64, mode: u16, size: u64, data_block: u64, block_count: u16) {
+    fn write_live_inode(
+        &mut self,
+        inode_num: u64,
+        mode: u16,
+        size: u64,
+        data_block: u64,
+        block_count: u16,
+    ) {
         self.write_inode_raw(inode_num, mode, size, 1, 0, data_block, block_count);
     }
 
     /// Write a deleted inode (dtime set, links_count=0) with extent pointing to data_block.
-    fn write_deleted_inode_dtime(&mut self, inode_num: u64, mode: u16, size: u64, dtime: u32, data_block: u64, block_count: u16) {
+    fn write_deleted_inode_dtime(
+        &mut self,
+        inode_num: u64,
+        mode: u16,
+        size: u64,
+        dtime: u32,
+        data_block: u64,
+        block_count: u16,
+    ) {
         self.write_inode_raw(inode_num, mode, size, 0, dtime, data_block, block_count);
     }
 
     /// Write a deleted inode (links_count=0, dtime=0) with extent pointing to data_block.
-    fn write_deleted_inode_nolinks(&mut self, inode_num: u64, mode: u16, size: u64, data_block: u64, block_count: u16) {
+    fn write_deleted_inode_nolinks(
+        &mut self,
+        inode_num: u64,
+        mode: u16,
+        size: u64,
+        data_block: u64,
+        block_count: u16,
+    ) {
         self.write_inode_raw(inode_num, mode, size, 0, 0, data_block, block_count);
     }
 
@@ -96,26 +120,26 @@ impl TestBuilder {
         block_count: u16,
     ) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
-        let off = self.inode_table_block as usize * 4096
-            + index as usize * self.inode_size as usize;
+        let off =
+            self.inode_table_block as usize * 4096 + index as usize * self.inode_size as usize;
 
-        self.put_u16(off, mode);                           // mode
-        self.put_u32(off + 4, size as u32);                // size_lo
-        self.put_u32(off + 108, (size >> 32) as u32);      // size_hi
-        self.put_u16(off + 26, links_count);               // links_count
-        self.put_u32(off + 20, dtime);                     // dtime
-        self.put_u32(off + 32, 0x80000);                   // flags: extents
+        self.put_u16(off, mode); // mode
+        self.put_u32(off + 4, size as u32); // size_lo
+        self.put_u32(off + 108, (size >> 32) as u32); // size_hi
+        self.put_u16(off + 26, links_count); // links_count
+        self.put_u32(off + 20, dtime); // dtime
+        self.put_u32(off + 32, 0x80000); // flags: extents
 
         // Extent tree header + one leaf entry
         let ext = off + 40;
-        self.put_u16(ext, 0xF30A);                          // magic
-        self.put_u16(ext + 2, 1);                            // entries
-        self.put_u16(ext + 4, 4);                            // max entries
-        self.put_u16(ext + 6, 0);                            // depth (leaf)
-        self.put_u32(ext + 12, 0);                           // logical block
-        self.put_u16(ext + 16, block_count);                 // block count
-        self.put_u16(ext + 18, (data_block >> 32) as u16);   // start_hi
-        self.put_u32(ext + 20, data_block as u32);           // start_lo
+        self.put_u16(ext, 0xF30A); // magic
+        self.put_u16(ext + 2, 1); // entries
+        self.put_u16(ext + 4, 4); // max entries
+        self.put_u16(ext + 6, 0); // depth (leaf)
+        self.put_u32(ext + 12, 0); // logical block
+        self.put_u16(ext + 16, block_count); // block count
+        self.put_u16(ext + 18, (data_block >> 32) as u16); // start_hi
+        self.put_u32(ext + 20, data_block as u32); // start_lo
     }
 
     fn write_data(&mut self, block: u64, content: &[u8]) {

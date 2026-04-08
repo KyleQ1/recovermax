@@ -4,7 +4,7 @@ pub mod ntfs;
 use serde::{Deserialize, Serialize};
 
 /// Detected filesystem information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FsInfo {
     pub fs_type: String,
     pub label: String,
@@ -15,13 +15,17 @@ pub struct FsInfo {
 }
 
 /// A recovered directory entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirEntry {
     pub inode: u64,
     pub name: String,
     pub file_type: FileType,
     pub size: u64,
     pub deleted: bool,
+    #[serde(default)]
+    pub source: EntrySource,
+    #[serde(default)]
+    pub parent_inode: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +34,14 @@ pub enum FileType {
     Directory,
     Symlink,
     Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EntrySource {
+    #[default]
+    Filesystem,
+    DeletedSlack,
+    SyntheticOrphan,
 }
 
 /// Trait for filesystem-specific parsers

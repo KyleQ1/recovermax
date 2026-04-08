@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::{DirEntry, EntrySource, FileType, FsInfo};
 use crate::io::ImageReader;
-use super::{DirEntry, FileType, FsInfo};
 
 /// NTFS OEM ID at offset 3 in the boot sector
 const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
@@ -58,7 +58,8 @@ impl NtfsBootSector {
 
 /// Parse an NTFS boot sector from a reader at a given partition offset
 pub fn parse_boot_sector(reader: &ImageReader, partition_offset: u64) -> Result<NtfsBootSector> {
-    let data = reader.read_at(partition_offset, 512)
+    let data = reader
+        .read_at(partition_offset, 512)
         .context("Failed to read NTFS boot sector")?;
 
     if data.len() < 512 {
@@ -69,7 +70,8 @@ pub fn parse_boot_sector(reader: &ImageReader, partition_offset: u64) -> Result<
     if &data[3..11] != NTFS_OEM_ID {
         anyhow::bail!(
             "Not an NTFS filesystem (OEM ID: {:?}, expected {:?})",
-            &data[3..11], NTFS_OEM_ID
+            &data[3..11],
+            NTFS_OEM_ID
         );
     }
 
@@ -236,7 +238,10 @@ pub fn parse_mft_entry(data: &[u8], entry_number: u64) -> Result<MftEntry> {
     if &data[0..4] != MFT_ENTRY_MAGIC {
         anyhow::bail!(
             "Not an MFT entry (magic: {:02x}{:02x}{:02x}{:02x}, expected FILE)",
-            data[0], data[1], data[2], data[3]
+            data[0],
+            data[1],
+            data[2],
+            data[3]
         );
     }
 
@@ -292,9 +297,9 @@ pub fn parse_mft_entry(data: &[u8], entry_number: u64) -> Result<MftEntry> {
             ATTR_TYPE_FILENAME => {
                 if non_resident == 0 {
                     // Resident filename attribute
-                    let content_offset = u16::from_le_bytes(
-                        [fixed[attr_pos + 0x14], fixed[attr_pos + 0x15]]
-                    ) as usize;
+                    let content_offset =
+                        u16::from_le_bytes([fixed[attr_pos + 0x14], fixed[attr_pos + 0x15]])
+                            as usize;
                     let content_start = attr_pos + content_offset;
 
                     if content_start + 66 <= fixed.len() {
@@ -334,12 +339,12 @@ pub fn parse_mft_entry(data: &[u8], entry_number: u64) -> Result<MftEntry> {
             ATTR_TYPE_DATA => {
                 if non_resident == 0 {
                     // Resident data — small file stored inline
-                    let content_len = u32::from_le_bytes(
-                        fixed[attr_pos + 0x10..attr_pos + 0x14].try_into()?
-                    ) as usize;
-                    let content_offset = u16::from_le_bytes(
-                        [fixed[attr_pos + 0x14], fixed[attr_pos + 0x15]]
-                    ) as usize;
+                    let content_len =
+                        u32::from_le_bytes(fixed[attr_pos + 0x10..attr_pos + 0x14].try_into()?)
+                            as usize;
+                    let content_offset =
+                        u16::from_le_bytes([fixed[attr_pos + 0x14], fixed[attr_pos + 0x15]])
+                            as usize;
                     let content_start = attr_pos + content_offset;
                     let content_end = content_start + content_len;
 
@@ -350,14 +355,13 @@ pub fn parse_mft_entry(data: &[u8], entry_number: u64) -> Result<MftEntry> {
                 } else {
                     // Non-resident data — read size and data runs
                     if attr_pos + 0x38 <= fixed.len() {
-                        file_size = u64::from_le_bytes(
-                            fixed[attr_pos + 0x30..attr_pos + 0x38].try_into()?
-                        );
+                        file_size =
+                            u64::from_le_bytes(fixed[attr_pos + 0x30..attr_pos + 0x38].try_into()?);
                     }
 
-                    let run_offset = u16::from_le_bytes(
-                        [fixed[attr_pos + 0x20], fixed[attr_pos + 0x21]]
-                    ) as usize;
+                    let run_offset =
+                        u16::from_le_bytes([fixed[attr_pos + 0x20], fixed[attr_pos + 0x21]])
+                            as usize;
                     let run_start = attr_pos + run_offset;
                     let run_end = attr_pos + attr_len;
 
@@ -412,7 +416,9 @@ impl<'a> NtfsFs<'a> {
         let mft_offset = self.cluster_offset(self.boot_sector.mft_cluster);
         let entry_offset = mft_offset + entry_number * entry_size;
 
-        let data = self.reader.read_at(entry_offset, entry_size as usize)
+        let data = self
+            .reader
+            .read_at(entry_offset, entry_size as usize)
             .with_context(|| format!("Failed to read MFT entry {}", entry_number))?;
 
         parse_mft_entry(data, entry_number)
@@ -434,6 +440,8 @@ impl<'a> NtfsFs<'a> {
             file_type: FileType::Directory,
             size: 0,
             deleted: false,
+            source: EntrySource::Filesystem,
+            parent_inode: Some(dir_entry),
         });
 
         // For root, parent is self
@@ -451,6 +459,8 @@ impl<'a> NtfsFs<'a> {
             file_type: FileType::Directory,
             size: 0,
             deleted: false,
+            source: EntrySource::Filesystem,
+            parent_inode: Some(dir_entry),
         });
 
         // Scan MFT entries whose parent_entry matches dir_entry
@@ -491,6 +501,8 @@ impl<'a> NtfsFs<'a> {
                 file_type: entry.file_type(),
                 size: entry.file_size,
                 deleted: false,
+                source: EntrySource::Filesystem,
+                parent_inode: Some(dir_entry),
             });
         }
 
@@ -522,11 +534,12 @@ impl<'a> NtfsFs<'a> {
         for run in &entry.data_runs {
             let offset = self.cluster_offset(run.cluster_offset);
             let len = run.cluster_count * cluster_size;
-            let data = self.reader.read_at(offset, len as usize)
-                .with_context(|| format!(
+            let data = self.reader.read_at(offset, len as usize).with_context(|| {
+                format!(
                     "Failed to read data run at cluster {} ({} clusters)",
                     run.cluster_offset, run.cluster_count
-                ))?;
+                )
+            })?;
             result.extend_from_slice(data);
         }
 

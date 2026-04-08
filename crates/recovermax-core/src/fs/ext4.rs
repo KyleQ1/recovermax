@@ -3,8 +3,8 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::{DirEntry, EntrySource, FileType, FsInfo};
 use crate::io::ImageReader;
-use super::{DirEntry, FileType, FsInfo};
 
 /// A deleted inode found by scanning inode tables
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +14,9 @@ pub struct DeletedInode {
     pub file_type: FileType,
     pub dtime: u32,
     pub mode: u16,
+    pub ctime: u32,
+    pub mtime: u32,
+    pub atime: u32,
 }
 
 // ext4 magic number at offset 0x38 in the superblock
@@ -64,19 +67,24 @@ impl Ext4Superblock {
     }
 
     pub fn has_64bit(&self) -> bool {
-        self.feature_incompat & 0x02 != 0
+        self.feature_incompat & 0x80 != 0
     }
 }
 
 /// Parse an ext4 superblock from a reader at a given partition offset
 pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<Ext4Superblock> {
     let sb_offset = partition_offset + SUPERBLOCK_OFFSET;
-    let data = reader.read_at(sb_offset, 1024)
+    let data = reader
+        .read_at(sb_offset, 1024)
         .context("Failed to read superblock")?;
 
     let magic = u16::from_le_bytes([data[0x38], data[0x39]]);
     if magic != EXT4_MAGIC {
-        anyhow::bail!("Not an ext4 filesystem (magic: 0x{:04x}, expected 0x{:04x})", magic, EXT4_MAGIC);
+        anyhow::bail!(
+            "Not an ext4 filesystem (magic: 0x{:04x}, expected 0x{:04x})",
+            magic,
+            EXT4_MAGIC
+        );
     }
 
     let inodes_count = u32::from_le_bytes(data[0x00..0x04].try_into()?);
@@ -103,8 +111,9 @@ pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<E
     // Volume name is at offset 0x78, 16 bytes, null-terminated
     let name_bytes = &data[0x78..0x88];
     let volume_name = String::from_utf8_lossy(
-        &name_bytes[..name_bytes.iter().position(|&b| b == 0).unwrap_or(16)]
-    ).to_string();
+        &name_bytes[..name_bytes.iter().position(|&b| b == 0).unwrap_or(16)],
+    )
+    .to_string();
 
     Ok(Ext4Superblock {
         inodes_count,
@@ -205,15 +214,31 @@ impl<'a> Ext4Fs<'a> {
         let index = (inode_num - 1) % inodes_per_group;
 
         let bg = self.read_group_descriptor(group)?;
-        let inode_offset = self.block_offset(bg.inode_table)
-            + index * self.superblock.inode_size as u64;
+        let inode_offset =
+            self.block_offset(bg.inode_table) + index * self.superblock.inode_size as u64;
 
-        let data = self.reader.read_at(inode_offset, self.superblock.inode_size as usize)?;
+        let data = self
+            .reader
+            .read_at(inode_offset, self.superblock.inode_size as usize)?;
 
         let mode = u16::from_le_bytes(data[0..2].try_into()?);
+        let atime = u32::from_le_bytes(data[8..12].try_into()?);
+        let ctime = u32::from_le_bytes(data[12..16].try_into()?);
+        let mtime = u32::from_le_bytes(data[16..20].try_into()?);
         let size_lo = u32::from_le_bytes(data[4..8].try_into()?);
         let size_hi = u32::from_le_bytes(data[108..112].try_into()?);
-        let size = (size_hi as u64) << 32 | size_lo as u64;
+        let file_type = match mode & 0xF000 {
+            0x8000 => FileType::RegularFile,
+            0x4000 => FileType::Directory,
+            0xA000 => FileType::Symlink,
+            _ => FileType::Other,
+        };
+        // On ext2/ext3, i_dir_acl overlaps the high 32 bits of i_size for non-regular files.
+        let size = if file_type == FileType::RegularFile {
+            (size_hi as u64) << 32 | size_lo as u64
+        } else {
+            size_lo as u64
+        };
         let links_count = u16::from_le_bytes(data[26..28].try_into()?);
         let flags = u32::from_le_bytes(data[32..36].try_into()?);
         let dtime = u32::from_le_bytes(data[20..24].try_into()?);
@@ -228,6 +253,9 @@ impl<'a> Ext4Fs<'a> {
             links_count,
             flags,
             dtime,
+            ctime,
+            mtime,
+            atime,
             block_data,
         })
     }
@@ -322,17 +350,13 @@ impl<'a> Ext4Fs<'a> {
             if result.len() >= target_size {
                 break;
             }
-            let block = u32::from_le_bytes(
-                inode.block_data[i * 4..(i + 1) * 4].try_into()?
-            ) as u64;
+            let block = u32::from_le_bytes(inode.block_data[i * 4..(i + 1) * 4].try_into()?) as u64;
             self.append_block_or_hole(&mut result, block)?;
         }
 
         // Indirect block (entry 12)
         if result.len() < target_size {
-            let indirect_block = u32::from_le_bytes(
-                inode.block_data[48..52].try_into()?
-            ) as u64;
+            let indirect_block = u32::from_le_bytes(inode.block_data[48..52].try_into()?) as u64;
             if indirect_block != 0 {
                 self.read_indirect(&mut result, indirect_block, target_size)?;
             }
@@ -340,9 +364,7 @@ impl<'a> Ext4Fs<'a> {
 
         // Double-indirect block (entry 13)
         if result.len() < target_size {
-            let dind_block = u32::from_le_bytes(
-                inode.block_data[52..56].try_into()?
-            ) as u64;
+            let dind_block = u32::from_le_bytes(inode.block_data[52..56].try_into()?) as u64;
             if dind_block != 0 {
                 self.read_double_indirect(&mut result, dind_block, target_size)?;
             }
@@ -350,9 +372,7 @@ impl<'a> Ext4Fs<'a> {
 
         // Triple-indirect block (entry 14)
         if result.len() < target_size {
-            let tind_block = u32::from_le_bytes(
-                inode.block_data[56..60].try_into()?
-            ) as u64;
+            let tind_block = u32::from_le_bytes(inode.block_data[56..60].try_into()?) as u64;
             if tind_block != 0 {
                 self.read_triple_indirect(&mut result, tind_block, target_size)?;
             }
@@ -374,7 +394,12 @@ impl<'a> Ext4Fs<'a> {
     }
 
     /// Read block pointers from an indirect block and append data.
-    fn read_indirect(&self, result: &mut Vec<u8>, indirect_block: u64, target_size: usize) -> Result<()> {
+    fn read_indirect(
+        &self,
+        result: &mut Vec<u8>,
+        indirect_block: u64,
+        target_size: usize,
+    ) -> Result<()> {
         let ptrs = self.read_block(indirect_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -389,7 +414,12 @@ impl<'a> Ext4Fs<'a> {
     }
 
     /// Read from a double-indirect block.
-    fn read_double_indirect(&self, result: &mut Vec<u8>, dind_block: u64, target_size: usize) -> Result<()> {
+    fn read_double_indirect(
+        &self,
+        result: &mut Vec<u8>,
+        dind_block: u64,
+        target_size: usize,
+    ) -> Result<()> {
         let ptrs = self.read_block(dind_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -406,7 +436,12 @@ impl<'a> Ext4Fs<'a> {
     }
 
     /// Read from a triple-indirect block.
-    fn read_triple_indirect(&self, result: &mut Vec<u8>, tind_block: u64, target_size: usize) -> Result<()> {
+    fn read_triple_indirect(
+        &self,
+        result: &mut Vec<u8>,
+        tind_block: u64,
+        target_size: usize,
+    ) -> Result<()> {
         let ptrs = self.read_block(tind_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -462,17 +497,13 @@ impl<'a> Ext4Fs<'a> {
             if written >= target_size {
                 return Ok(written);
             }
-            let block = u32::from_le_bytes(
-                inode.block_data[i * 4..(i + 1) * 4].try_into()?
-            ) as u64;
+            let block = u32::from_le_bytes(inode.block_data[i * 4..(i + 1) * 4].try_into()?) as u64;
             written = self.stream_block_or_hole(writer, block, written, target_size)?;
         }
 
         // Indirect block (entry 12)
         if written < target_size {
-            let indirect_block = u32::from_le_bytes(
-                inode.block_data[48..52].try_into()?
-            ) as u64;
+            let indirect_block = u32::from_le_bytes(inode.block_data[48..52].try_into()?) as u64;
             if indirect_block != 0 {
                 written = self.stream_indirect(writer, indirect_block, written, target_size)?;
             }
@@ -480,9 +511,7 @@ impl<'a> Ext4Fs<'a> {
 
         // Double-indirect block (entry 13)
         if written < target_size {
-            let dind_block = u32::from_le_bytes(
-                inode.block_data[52..56].try_into()?
-            ) as u64;
+            let dind_block = u32::from_le_bytes(inode.block_data[52..56].try_into()?) as u64;
             if dind_block != 0 {
                 written = self.stream_double_indirect(writer, dind_block, written, target_size)?;
             }
@@ -490,9 +519,7 @@ impl<'a> Ext4Fs<'a> {
 
         // Triple-indirect block (entry 14)
         if written < target_size {
-            let tind_block = u32::from_le_bytes(
-                inode.block_data[56..60].try_into()?
-            ) as u64;
+            let tind_block = u32::from_le_bytes(inode.block_data[56..60].try_into()?) as u64;
             if tind_block != 0 {
                 written = self.stream_triple_indirect(writer, tind_block, written, target_size)?;
             }
@@ -503,7 +530,13 @@ impl<'a> Ext4Fs<'a> {
 
     /// Write one block to the writer, or a block-sized hole (zeros) if block == 0.
     /// Returns the new total bytes written, capped at target_size.
-    fn stream_block_or_hole(&self, writer: &mut impl Write, block: u64, written: u64, target_size: u64) -> Result<u64> {
+    fn stream_block_or_hole(
+        &self,
+        writer: &mut impl Write,
+        block: u64,
+        written: u64,
+        target_size: u64,
+    ) -> Result<u64> {
         let bs = self.superblock.block_size() as u64;
         let remaining = target_size - written;
         let to_write = bs.min(remaining) as usize;
@@ -525,7 +558,13 @@ impl<'a> Ext4Fs<'a> {
         Ok(written + to_write as u64)
     }
 
-    fn stream_indirect(&self, writer: &mut impl Write, indirect_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+    fn stream_indirect(
+        &self,
+        writer: &mut impl Write,
+        indirect_block: u64,
+        mut written: u64,
+        target_size: u64,
+    ) -> Result<u64> {
         let ptrs = self.read_block(indirect_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -539,7 +578,13 @@ impl<'a> Ext4Fs<'a> {
         Ok(written)
     }
 
-    fn stream_double_indirect(&self, writer: &mut impl Write, dind_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+    fn stream_double_indirect(
+        &self,
+        writer: &mut impl Write,
+        dind_block: u64,
+        mut written: u64,
+        target_size: u64,
+    ) -> Result<u64> {
         let ptrs = self.read_block(dind_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -555,7 +600,13 @@ impl<'a> Ext4Fs<'a> {
         Ok(written)
     }
 
-    fn stream_triple_indirect(&self, writer: &mut impl Write, tind_block: u64, mut written: u64, target_size: u64) -> Result<u64> {
+    fn stream_triple_indirect(
+        &self,
+        writer: &mut impl Write,
+        tind_block: u64,
+        mut written: u64,
+        target_size: u64,
+    ) -> Result<u64> {
         let ptrs = self.read_block(tind_block)?;
         let ptrs_per_block = self.superblock.block_size() as usize / 4;
 
@@ -591,7 +642,8 @@ impl<'a> Ext4Fs<'a> {
                 continue;
             }
 
-            let inode_table_blocks = (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+            let inode_table_blocks =
+                (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
 
             for tbl_block in 0..inode_table_blocks {
                 let abs_block = bg.inode_table + tbl_block as u64;
@@ -619,6 +671,9 @@ impl<'a> Ext4Fs<'a> {
                     let data = &block_data[off..off + inode_size];
                     let mode = u16::from_le_bytes([data[0], data[1]]);
                     let size_lo = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+                    let atime = u32::from_le_bytes(data[8..12].try_into().unwrap_or([0; 4]));
+                    let ctime = u32::from_le_bytes(data[12..16].try_into().unwrap_or([0; 4]));
+                    let mtime = u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
                     let links_count = u16::from_le_bytes([data[26], data[27]]);
                     let dtime = u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
                     let size_hi = if data.len() >= 112 {
@@ -646,6 +701,9 @@ impl<'a> Ext4Fs<'a> {
                         file_type,
                         dtime,
                         mode,
+                        ctime,
+                        mtime,
+                        atime,
                     });
                 }
             }
@@ -668,6 +726,9 @@ pub struct Inode {
     pub links_count: u16,
     pub flags: u32,
     pub dtime: u32,
+    pub ctime: u32,
+    pub mtime: u32,
+    pub atime: u32,
     pub block_data: [u8; 60],
 }
 
@@ -708,7 +769,7 @@ pub struct Extent {
     pub block_count: u16,
 }
 
-fn parse_directory_entries(data: &[u8], _parent_inode: &Inode) -> Result<Vec<DirEntry>> {
+fn parse_directory_entries(data: &[u8], parent_inode: &Inode) -> Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
     let mut pos = 0;
 
@@ -718,41 +779,134 @@ fn parse_directory_entries(data: &[u8], _parent_inode: &Inode) -> Result<Vec<Dir
         let name_len = data[pos + 6] as usize;
         let file_type_byte = data[pos + 7];
 
-        if rec_len == 0 || pos + rec_len > data.len() {
-            break;
-        }
+        let Some(record_end) = pos.checked_add(rec_len) else {
+            pos += 4;
+            continue;
+        };
 
-        if inode != 0 && name_len > 0 && pos + 8 + name_len <= data.len() {
+        let min_record_len = directory_entry_record_len(name_len);
+        let file_type = directory_entry_file_type(file_type_byte);
+        let is_plausible = rec_len >= 8
+            && rec_len % 4 == 0
+            && record_end <= data.len()
+            && name_len > 0
+            && pos + 8 + name_len <= record_end
+            && file_type != FileType::Other
+            && directory_name_looks_plausible_live(&data[pos + 8..pos + 8 + name_len]);
+
+        if is_plausible {
             let name = String::from_utf8_lossy(&data[pos + 8..pos + 8 + name_len]).to_string();
-
-            let file_type = match file_type_byte {
-                1 => FileType::RegularFile,
-                2 => FileType::Directory,
-                7 => FileType::Symlink,
-                _ => FileType::Other,
-            };
-
             entries.push(DirEntry {
                 inode,
                 name,
                 file_type,
                 size: 0, // filled in later by reading the inode
-                deleted: false,
+                deleted: inode == 0,
+                source: if inode == 0 {
+                    EntrySource::DeletedSlack
+                } else {
+                    EntrySource::Filesystem
+                },
+                parent_inode: Some(parent_inode.number),
             });
-        } else if inode == 0 && name_len > 0 && pos + 8 + name_len <= data.len() {
-            // Deleted entry - inode zeroed out but name may remain
-            let name = String::from_utf8_lossy(&data[pos + 8..pos + 8 + name_len]).to_string();
-            entries.push(DirEntry {
-                inode: 0,
-                name,
-                file_type: FileType::Other,
-                size: 0,
-                deleted: true,
-            });
+
+            if min_record_len < rec_len {
+                scan_deleted_directory_slack(
+                    &data[pos + min_record_len..record_end],
+                    parent_inode.number,
+                    &mut entries,
+                )?;
+            }
+
+            pos += rec_len;
+            continue;
         }
 
-        pos += rec_len;
+        pos += 4;
     }
 
     Ok(entries)
+}
+
+fn scan_deleted_directory_slack(
+    data: &[u8],
+    parent_inode: u64,
+    entries: &mut Vec<DirEntry>,
+) -> Result<()> {
+    let mut pos = 0;
+
+    while pos + 8 <= data.len() {
+        let inode = u32::from_le_bytes(data[pos..pos + 4].try_into()?) as u64;
+        let rec_len = u16::from_le_bytes(data[pos + 4..pos + 6].try_into()?) as usize;
+        let name_len = data[pos + 6] as usize;
+        let file_type_byte = data[pos + 7];
+
+        let Some(record_end) = pos.checked_add(rec_len) else {
+            pos += 4;
+            continue;
+        };
+
+        let min_record_len = directory_entry_record_len(name_len);
+        let file_type = directory_entry_file_type(file_type_byte);
+        let looks_valid = rec_len >= 8
+            && rec_len % 4 == 0
+            && name_len > 0
+            && rec_len >= min_record_len
+            && record_end <= data.len()
+            && pos + 8 + name_len <= record_end
+            && file_type != FileType::Other
+            && directory_name_looks_plausible_deleted(&data[pos + 8..pos + 8 + name_len]);
+
+        if looks_valid {
+            let name = String::from_utf8_lossy(&data[pos + 8..pos + 8 + name_len]).to_string();
+            entries.push(DirEntry {
+                inode,
+                name,
+                file_type,
+                size: 0,
+                deleted: true,
+                source: EntrySource::DeletedSlack,
+                parent_inode: Some(parent_inode),
+            });
+
+            if min_record_len < rec_len {
+                scan_deleted_directory_slack(
+                    &data[pos + min_record_len..pos + rec_len],
+                    parent_inode,
+                    entries,
+                )?;
+            }
+
+            pos += rec_len;
+            continue;
+        }
+
+        pos += 4;
+    }
+
+    Ok(())
+}
+
+fn directory_entry_record_len(name_len: usize) -> usize {
+    (8 + name_len + 3) & !3
+}
+
+fn directory_entry_file_type(file_type_byte: u8) -> FileType {
+    match file_type_byte {
+        1 => FileType::RegularFile,
+        2 => FileType::Directory,
+        7 => FileType::Symlink,
+        _ => FileType::Other,
+    }
+}
+
+fn directory_name_looks_plausible_live(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.iter().all(|byte| {
+            !byte.is_ascii_control() && *byte != 0 && *byte != b'/' && *byte != b'\\'
+        })
+}
+
+fn directory_name_looks_plausible_deleted(name: &[u8]) -> bool {
+    directory_name_looks_plausible_live(name) && name != b"." && name != b".."
 }

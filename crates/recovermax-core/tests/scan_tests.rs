@@ -1,7 +1,7 @@
-use std::io::Write;
-use tempfile::NamedTempFile;
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::Scanner;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -50,7 +50,8 @@ fn build_ext4_superblock(label: &str, log_block_size: u32, blocks_count: u32) ->
     // feature_incompat (extents)
     img[sb + 0x60..sb + 0x64].copy_from_slice(&0x40u32.to_le_bytes());
     // UUID
-    img[sb + 0x68..sb + 0x78].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    img[sb + 0x68..sb + 0x78]
+        .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     // volume name
     let name_bytes = label.as_bytes();
     let len = name_bytes.len().min(16);
@@ -89,11 +90,7 @@ fn detect_mbr_single_partition() {
 
 #[test]
 fn detect_mbr_multiple_partitions() {
-    let mut img = build_mbr(&[
-        (0x83, 2048, 4096),
-        (0x82, 6144, 2048),
-        (0x07, 8192, 8192),
-    ]);
+    let mut img = build_mbr(&[(0x83, 2048, 4096), (0x82, 6144, 2048), (0x07, 8192, 8192)]);
     img.extend(vec![0u8; 16 * 1024 * 1024]);
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
@@ -135,10 +132,10 @@ fn mbr_bad_signature() {
 #[test]
 fn mbr_partition_type_names() {
     let mut img = build_mbr(&[
-        (0x0B, 2048, 1024),  // FAT32
-        (0xEE, 3072, 1024),  // GPT protective
-        (0x8E, 4096, 1024),  // LVM
-        (0xFD, 5120, 1024),  // Linux RAID
+        (0x0B, 2048, 1024), // FAT32
+        (0xEE, 3072, 1024), // GPT protective
+        (0x8E, 4096, 1024), // LVM
+        (0xFD, 5120, 1024), // Linux RAID
     ]);
     img.extend(vec![0u8; 4 * 1024 * 1024]);
     let f = create_test_image(&img);
@@ -295,4 +292,72 @@ fn scan_report_serialization_roundtrip() {
     assert_eq!(deserialized.image_size, report.image_size);
     assert_eq!(deserialized.filesystems.len(), report.filesystems.len());
     assert_eq!(deserialized.filesystems[0].label, "serialize");
+}
+
+#[test]
+fn scan_artifact_roundtrip_preserves_source_metadata() {
+    let img = build_ext4_superblock("artifact", 1, 2048);
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+
+    let artifact = recovermax_core::scan::ScanArtifact::from_report(f.path(), report.clone());
+    let json = serde_json::to_string(&artifact).unwrap();
+    let loaded = recovermax_core::scan::ScanArtifact::from_json_str(&json).unwrap();
+    let expected_path = f.path().canonicalize().unwrap();
+
+    assert_eq!(loaded.version, recovermax_core::scan::ScanArtifact::VERSION);
+    assert_eq!(loaded.source.image_size, report.image_size);
+    assert_eq!(loaded.source.path, expected_path);
+    assert_eq!(loaded.report.filesystems[0].label, "artifact");
+}
+
+#[test]
+fn legacy_scan_report_json_loads_as_artifact() {
+    let img = build_ext4_superblock("legacy", 0, 512);
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+
+    let json = serde_json::to_string(&report).unwrap();
+    let loaded = recovermax_core::scan::ScanArtifact::from_json_str(&json).unwrap();
+
+    assert_eq!(loaded.version, recovermax_core::scan::ScanArtifact::VERSION);
+    assert!(loaded.source.path.as_os_str().is_empty());
+    assert_eq!(loaded.source.image_size, report.image_size);
+    assert_eq!(loaded.report.filesystems[0].label, "legacy");
+}
+
+#[test]
+fn scan_artifact_validation_rejects_wrong_image_path() {
+    let img = build_ext4_superblock("validate", 1, 1024);
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+
+    let artifact = recovermax_core::scan::ScanArtifact::from_report(f.path(), report);
+    let err = artifact
+        .validate_for_image(std::path::Path::new("/tmp/other.img"), reader.len())
+        .unwrap_err();
+
+    assert!(err.to_string().contains("was created for"));
+}
+
+#[test]
+fn scan_artifact_validation_rejects_wrong_image_size() {
+    let img = build_ext4_superblock("validate-size", 1, 1024);
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+
+    let artifact = recovermax_core::scan::ScanArtifact::from_report(f.path(), report);
+    let err = artifact
+        .validate_for_image(f.path(), reader.len() + 1)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("does not match image"));
 }

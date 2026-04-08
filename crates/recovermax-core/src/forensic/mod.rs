@@ -1,7 +1,7 @@
-pub mod hash;
 pub mod audit;
+pub mod hash;
 pub mod report;
 
+pub use audit::{AuditAction, AuditEntry, AuditLog, CaseInfo};
 pub use hash::ImageHasher;
-pub use audit::{AuditLog, AuditEntry, AuditAction, CaseInfo};
 pub use report::ForensicReport;

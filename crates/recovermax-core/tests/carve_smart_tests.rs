@@ -1,10 +1,10 @@
 //! Tests for format-aware ("smart") carving: header-based size detection
 //! and smarter footer validation for JPEG and GIF.
 
+use recovermax_core::carve::Carver;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use recovermax_core::io::ImageReader;
-use recovermax_core::carve::Carver;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -58,7 +58,8 @@ fn sqlite_carved_size_matches_header() {
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
     assert_eq!(
-        carved.len(), 32768,
+        carved.len(),
+        32768,
         "SQLite carved size should be page_size * page_count, not max_size"
     );
 }
@@ -94,13 +95,20 @@ fn sqlite_invalid_page_size_falls_back() {
     img[16] = 0x01;
     img[17] = 0x2C;
 
-    img[28] = 0x00; img[29] = 0x00; img[30] = 0x00; img[31] = 0x04;
+    img[28] = 0x00;
+    img[29] = 0x00;
+    img[30] = 0x00;
+    img[31] = 0x04;
 
     let (dest, files) = carve_image(&img, Some(&["sqlite"]));
     assert_eq!(files.len(), 1);
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    assert_eq!(carved.len(), total_image, "Invalid page_size should fall back to max");
+    assert_eq!(
+        carved.len(),
+        total_image,
+        "Invalid page_size should fall back to max"
+    );
 }
 
 // ===========================================================================
@@ -137,7 +145,8 @@ fn elf64_le_carved_size_matches_header() {
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
     assert_eq!(
-        carved.len(), 4352,
+        carved.len(),
+        4352,
         "ELF carved size should be e_shoff + (e_shnum * e_shentsize)"
     );
 }
@@ -181,7 +190,7 @@ fn elf_zero_shoff_falls_back() {
     img[0..4].copy_from_slice(&[0x7F, 0x45, 0x4C, 0x46]);
     img[4] = 2; // 64-bit
     img[5] = 1; // little-endian
-    // e_shoff, e_shentsize, e_shnum all zero (default)
+                // e_shoff, e_shentsize, e_shnum all zero (default)
 
     let (dest, files) = carve_image(&img, Some(&["elf"]));
     assert_eq!(files.len(), 1);
@@ -198,16 +207,21 @@ fn elf_zero_shoff_falls_back() {
 fn jpeg_skips_early_false_footer() {
     let mut img = vec![0u8; 8192];
     // JPEG header
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
 
     // False footer at offset 200 (within 512 bytes of header start)
-    img[200] = 0xFF; img[201] = 0xD9;
+    img[200] = 0xFF;
+    img[201] = 0xD9;
 
     // Another false footer at offset 600 (past 512 but total < 1024 bytes)
-    img[600] = 0xFF; img[601] = 0xD9;
+    img[600] = 0xFF;
+    img[601] = 0xD9;
 
     // Real footer at offset 2000
-    img[2000] = 0xFF; img[2001] = 0xD9;
+    img[2000] = 0xFF;
+    img[2001] = 0xD9;
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
@@ -222,13 +236,17 @@ fn jpeg_skips_early_false_footer() {
 #[test]
 fn jpeg_accepts_footer_past_min_distance() {
     let mut img = vec![0u8; 8192];
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
 
     // Footer at offset 1500 — past 512 bytes and carved_len=1502 > 1024
-    img[1500] = 0xFF; img[1501] = 0xD9;
+    img[1500] = 0xFF;
+    img[1501] = 0xD9;
 
     // Another footer further out
-    img[5000] = 0xFF; img[5001] = 0xD9;
+    img[5000] = 0xFF;
+    img[5001] = 0xD9;
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
@@ -247,19 +265,26 @@ fn gif_skips_immediate_false_footer() {
     img[0..4].copy_from_slice(b"GIF8");
 
     // False footer at offset 20 (within 64 bytes of header)
-    img[20] = 0x00; img[21] = 0x3B;
+    img[20] = 0x00;
+    img[21] = 0x3B;
 
     // False footer at offset 50 (still within 64 bytes)
-    img[50] = 0x00; img[51] = 0x3B;
+    img[50] = 0x00;
+    img[51] = 0x3B;
 
     // Real footer at offset 200 (past 64 bytes)
-    img[200] = 0x00; img[201] = 0x3B;
+    img[200] = 0x00;
+    img[201] = 0x3B;
 
     let (dest, files) = carve_image(&img, Some(&["gif"]));
     assert_eq!(files.len(), 1);
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    assert_eq!(carved.len(), 202, "Should skip footers within 64 bytes of header");
+    assert_eq!(
+        carved.len(),
+        202,
+        "Should skip footers within 64 bytes of header"
+    );
 }
 
 #[test]
@@ -268,7 +293,8 @@ fn gif_accepts_footer_past_min_distance() {
     img[0..4].copy_from_slice(b"GIF8");
 
     // Footer at offset 100 — past the 64-byte minimum
-    img[100] = 0x00; img[101] = 0x3B;
+    img[100] = 0x00;
+    img[101] = 0x3B;
 
     let (dest, files) = carve_image(&img, Some(&["gif"]));
     assert_eq!(files.len(), 1);
@@ -300,7 +326,11 @@ fn zip_carved_to_eocd() {
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
     // EOCD at 2000 + 22 bytes fixed size + 0 comment = 2022
-    assert_eq!(carved.len(), 2022, "ZIP should be carved to end of EOCD record");
+    assert_eq!(
+        carved.len(),
+        2022,
+        "ZIP should be carved to end of EOCD record"
+    );
 }
 
 #[test]
@@ -321,7 +351,11 @@ fn zip_eocd_with_comment() {
 
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
     // 3000 + 22 + 100 = 3122
-    assert_eq!(carved.len(), 3122, "ZIP should include comment in carved size");
+    assert_eq!(
+        carved.len(),
+        3122,
+        "ZIP should include comment in carved size"
+    );
 }
 
 #[test]

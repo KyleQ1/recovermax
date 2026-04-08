@@ -1,6 +1,6 @@
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use recovermax_core::io::ImageReader;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();

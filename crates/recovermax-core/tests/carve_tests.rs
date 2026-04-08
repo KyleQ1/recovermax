@@ -1,7 +1,7 @@
+use recovermax_core::carve::Carver;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use recovermax_core::io::ImageReader;
-use recovermax_core::carve::Carver;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -32,9 +32,12 @@ fn carve_image(data: &[u8], type_filter: Option<&[&str]>) -> (TempDir, Vec<Strin
 fn carve_jpeg_with_footer() {
     let mut img = vec![0u8; 4096];
     // JPEG at sector 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
     // Footer at offset 1500 (past the 512-byte min distance and 1KB min size)
-    img[1500] = 0xFF; img[1501] = 0xD9;
+    img[1500] = 0xFF;
+    img[1501] = 0xD9;
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
 
     assert_eq!(files.len(), 1);
@@ -86,11 +89,15 @@ fn carve_pdf_with_footer() {
 fn carve_multiple_types() {
     let mut img = vec![0u8; 8192];
     // JPEG at sector 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[200] = 0xFF; img[201] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[200] = 0xFF;
+    img[201] = 0xD9;
     // GIF at sector 1 (offset 512)
     img[512..516].copy_from_slice(b"GIF8");
-    img[800] = 0x00; img[801] = 0x3B;
+    img[800] = 0x00;
+    img[801] = 0x3B;
     // PDF at sector 4 (offset 2048)
     img[2048..2052].copy_from_slice(b"%PDF");
     img[3000..3005].copy_from_slice(b"%%EOF");
@@ -112,8 +119,11 @@ fn carve_multiple_types() {
 fn carve_filter_only_jpg() {
     let mut img = vec![0u8; 4096];
     // JPEG
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[100] = 0xFF; img[101] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[100] = 0xFF;
+    img[101] = 0xD9;
     // PNG (should be skipped)
     img[512..520].copy_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
@@ -125,8 +135,11 @@ fn carve_filter_only_jpg() {
 #[test]
 fn carve_filter_case_insensitive() {
     let mut img = vec![0u8; 4096];
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[100] = 0xFF; img[101] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[100] = 0xFF;
+    img[101] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["JPG"]));
     assert_eq!(files.len(), 1);
@@ -135,8 +148,11 @@ fn carve_filter_case_insensitive() {
 #[test]
 fn carve_filter_by_name() {
     let mut img = vec![0u8; 4096];
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[100] = 0xFF; img[101] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[100] = 0xFF;
+    img[101] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["JPEG"]));
     assert_eq!(files.len(), 1);
@@ -145,8 +161,11 @@ fn carve_filter_by_name() {
 #[test]
 fn carve_filter_no_matches() {
     let mut img = vec![0u8; 4096];
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[100] = 0xFF; img[101] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[100] = 0xFF;
+    img[101] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["sqlite"]));
     assert_eq!(files.len(), 0);
@@ -173,8 +192,11 @@ fn carve_no_signatures_found() {
 fn carved_filename_has_hex_offset() {
     let mut img = vec![0u8; 2048];
     // JPEG at sector 2 (offset 1024 = 0x400)
-    img[1024] = 0xFF; img[1025] = 0xD8; img[1026] = 0xFF;
-    img[1500] = 0xFF; img[1501] = 0xD9;
+    img[1024] = 0xFF;
+    img[1025] = 0xD8;
+    img[1026] = 0xFF;
+    img[1500] = 0xFF;
+    img[1501] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
@@ -188,8 +210,11 @@ fn carved_filename_has_hex_offset() {
 fn carve_only_finds_sector_aligned_signatures() {
     let mut img = vec![0u8; 4096];
     // JPEG at non-sector-aligned offset (offset 100, not on 512 boundary)
-    img[100] = 0xFF; img[101] = 0xD8; img[102] = 0xFF;
-    img[300] = 0xFF; img[301] = 0xD9;
+    img[100] = 0xFF;
+    img[101] = 0xD8;
+    img[102] = 0xFF;
+    img[300] = 0xFF;
+    img[301] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["jpg"]));
     // Should NOT find it since carving scans on 512-byte boundaries

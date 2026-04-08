@@ -1,9 +1,9 @@
 //! Complex carving tests — edge cases that stress the carving engine.
 
+use recovermax_core::carve::Carver;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use recovermax_core::io::ImageReader;
-use recovermax_core::carve::Carver;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -38,13 +38,17 @@ fn carve_image(data: &[u8], type_filter: Option<&[&str]>) -> (TempDir, Vec<Strin
 fn jpeg_with_false_footer_in_data() {
     let mut img = vec![0u8; 8192];
     // JPEG header at sector 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
 
     // False footer at offset 100 (inside the "image data", within 512 bytes of header)
-    img[100] = 0xFF; img[101] = 0xD9;
+    img[100] = 0xFF;
+    img[101] = 0xD9;
 
     // Real footer at offset 2000
-    img[2000] = 0xFF; img[2001] = 0xD9;
+    img[2000] = 0xFF;
+    img[2001] = 0xD9;
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
@@ -53,7 +57,8 @@ fn jpeg_with_false_footer_in_data() {
     // Smart carver skips the false footer at 100 (within 512 bytes of header)
     // and finds the real footer at 2000, giving carved length 2002.
     assert_eq!(
-        carved.len(), 2002,
+        carved.len(),
+        2002,
         "Smart carver should skip false footer and find the real one at 2002."
     );
 }
@@ -70,12 +75,18 @@ fn back_to_back_files_same_sector() {
     let mut img = vec![0u8; 4096];
 
     // First JPEG at offset 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[200] = 0xFF; img[201] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[200] = 0xFF;
+    img[201] = 0xD9;
 
     // Second JPEG at offset 250 (NOT sector-aligned)
-    img[250] = 0xFF; img[251] = 0xD8; img[252] = 0xFF;
-    img[400] = 0xFF; img[401] = 0xD9;
+    img[250] = 0xFF;
+    img[251] = 0xD8;
+    img[252] = 0xFF;
+    img[400] = 0xFF;
+    img[401] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["jpg"]));
 
@@ -95,8 +106,11 @@ fn signature_at_end_of_image() {
     // JPEG header at sector 10 (offset 5120)
     // Footer at offset 6700 (distance 1580, well past the 512/1024 minimums)
     let start = 5120;
-    img[start] = 0xFF; img[start + 1] = 0xD8; img[start + 2] = 0xFF;
-    img[6700] = 0xFF; img[6701] = 0xD9;
+    img[start] = 0xFF;
+    img[start + 1] = 0xD8;
+    img[start + 2] = 0xFF;
+    img[6700] = 0xFF;
+    img[6701] = 0xD9;
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 1);
@@ -113,7 +127,9 @@ fn signature_at_end_of_image() {
 fn truncated_file_no_footer_before_eof() {
     let mut img = vec![0u8; 2048];
     // JPEG header but image ends before any footer
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
     // No 0xFF 0xD9 anywhere
 
     let (dest, files) = carve_image(&img, Some(&["jpg"]));
@@ -121,7 +137,11 @@ fn truncated_file_no_footer_before_eof() {
 
     // Should carve up to end of image (or max_size, whichever is smaller)
     let carved = std::fs::read(dest.path().join(&files[0])).unwrap();
-    assert_eq!(carved.len(), 2048, "Should carve to end of image when no footer found");
+    assert_eq!(
+        carved.len(),
+        2048,
+        "Should carve to end of image when no footer found"
+    );
 }
 
 // ===========================================================================
@@ -173,9 +193,12 @@ fn gif_false_footer_frequency() {
     img[0..4].copy_from_slice(b"GIF8");
 
     // Scatter 0x00 0x3B (GIF footer) throughout — first one at offset 10
-    img[10] = 0x00; img[11] = 0x3B;
-    img[500] = 0x00; img[501] = 0x3B;
-    img[4000] = 0x00; img[4001] = 0x3B;
+    img[10] = 0x00;
+    img[11] = 0x3B;
+    img[500] = 0x00;
+    img[501] = 0x3B;
+    img[4000] = 0x00;
+    img[4001] = 0x3B;
 
     let (dest, files) = carve_image(&img, Some(&["gif"]));
     assert_eq!(files.len(), 1);
@@ -184,7 +207,8 @@ fn gif_false_footer_frequency() {
     // Smart carver skips footer at offset 10 (within 64 bytes of header)
     // and finds the next one at offset 500.
     assert_eq!(
-        carved.len(), 502,
+        carved.len(),
+        502,
         "Should skip false footer at 10 and stop at the one at 500"
     );
 }
@@ -198,16 +222,25 @@ fn multiple_jpegs_across_image() {
     let mut img = vec![0u8; 16384];
 
     // JPEG 1 at sector 0
-    img[0] = 0xFF; img[1] = 0xD8; img[2] = 0xFF;
-    img[300] = 0xFF; img[301] = 0xD9;
+    img[0] = 0xFF;
+    img[1] = 0xD8;
+    img[2] = 0xFF;
+    img[300] = 0xFF;
+    img[301] = 0xD9;
 
     // JPEG 2 at sector 4 (offset 2048)
-    img[2048] = 0xFF; img[2049] = 0xD8; img[2050] = 0xFF;
-    img[3000] = 0xFF; img[3001] = 0xD9;
+    img[2048] = 0xFF;
+    img[2049] = 0xD8;
+    img[2050] = 0xFF;
+    img[3000] = 0xFF;
+    img[3001] = 0xD9;
 
     // JPEG 3 at sector 10 (offset 5120)
-    img[5120] = 0xFF; img[5121] = 0xD8; img[5122] = 0xFF;
-    img[6000] = 0xFF; img[6001] = 0xD9;
+    img[5120] = 0xFF;
+    img[5121] = 0xD8;
+    img[5122] = 0xFF;
+    img[6000] = 0xFF;
+    img[6001] = 0xD9;
 
     let (_dest, files) = carve_image(&img, Some(&["jpg"]));
     assert_eq!(files.len(), 3, "Should find all 3 JPEGs");
@@ -228,11 +261,15 @@ fn jpeg_footer_inside_png_data() {
     img[5000..5008].copy_from_slice(&png_ftr);
 
     // JPEG footer bytes randomly inside the PNG region
-    img[2000] = 0xFF; img[2001] = 0xD9;
+    img[2000] = 0xFF;
+    img[2001] = 0xD9;
 
     // JPEG at sector 12 (offset 6144)
-    img[6144] = 0xFF; img[6145] = 0xD8; img[6146] = 0xFF;
-    img[7000] = 0xFF; img[7001] = 0xD9;
+    img[6144] = 0xFF;
+    img[6145] = 0xD8;
+    img[6146] = 0xFF;
+    img[7000] = 0xFF;
+    img[7001] = 0xD9;
 
     let (_dest, files) = carve_image(&img, None);
 
@@ -283,13 +320,17 @@ fn all_signature_types_in_one_image() {
     let mut offset = 0usize;
 
     // JPEG at sector 0
-    img[offset] = 0xFF; img[offset + 1] = 0xD8; img[offset + 2] = 0xFF;
-    img[offset + 300] = 0xFF; img[offset + 301] = 0xD9;
+    img[offset] = 0xFF;
+    img[offset + 1] = 0xD8;
+    img[offset + 2] = 0xFF;
+    img[offset + 300] = 0xFF;
+    img[offset + 301] = 0xD9;
     offset += 512;
 
     // PNG at sector 1
     img[offset..offset + 8].copy_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
-    img[offset + 400..offset + 408].copy_from_slice(&[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
+    img[offset + 400..offset + 408]
+        .copy_from_slice(&[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]);
     offset += 512;
 
     // PDF at sector 2
@@ -303,7 +344,8 @@ fn all_signature_types_in_one_image() {
 
     // GIF at sector 4
     img[offset..offset + 4].copy_from_slice(b"GIF8");
-    img[offset + 400] = 0x00; img[offset + 401] = 0x3B;
+    img[offset + 400] = 0x00;
+    img[offset + 401] = 0x3B;
     offset += 512;
 
     // ELF at sector 5
@@ -326,7 +368,10 @@ fn all_signature_types_in_one_image() {
     assert!(files.iter().any(|f| f.ends_with(".gif")), "Missing GIF");
     assert!(files.iter().any(|f| f.ends_with(".elf")), "Missing ELF");
     assert!(files.iter().any(|f| f.ends_with(".gz")), "Missing gzip");
-    assert!(files.iter().any(|f| f.ends_with(".sqlite")), "Missing SQLite");
+    assert!(
+        files.iter().any(|f| f.ends_with(".sqlite")),
+        "Missing SQLite"
+    );
 }
 
 // ===========================================================================
@@ -354,14 +399,28 @@ fn identical_headers_consecutive_sectors() {
     assert_eq!(files.len(), 2, "Should find both PDFs");
 
     // Verify sizes
-    let mut sizes: Vec<u64> = files.iter().map(|f| {
-        std::fs::metadata(
-            std::path::Path::new(&format!("{}", _dest.path().join(f).display()))
-        ).unwrap().len()
-    }).collect();
+    let mut sizes: Vec<u64> = files
+        .iter()
+        .map(|f| {
+            std::fs::metadata(std::path::Path::new(&format!(
+                "{}",
+                _dest.path().join(f).display()
+            )))
+            .unwrap()
+            .len()
+        })
+        .collect();
     sizes.sort();
 
     // Both should be small (a few hundred bytes)
-    assert!(sizes[0] < 1000, "First PDF should be small, got {}", sizes[0]);
-    assert!(sizes[1] < 1000, "Second PDF should be small, got {}", sizes[1]);
+    assert!(
+        sizes[0] < 1000,
+        "First PDF should be small, got {}",
+        sizes[0]
+    );
+    assert!(
+        sizes[1] < 1000,
+        "Second PDF should be small, got {}",
+        sizes[1]
+    );
 }

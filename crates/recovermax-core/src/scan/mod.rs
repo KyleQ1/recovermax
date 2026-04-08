@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::{self, FsInfo};
 use crate::io::ImageReader;
+pub use crate::session::ScanImageSource;
+pub type ScanArtifact = crate::session::RecoverySessionArtifact;
 
 /// Partition table entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Partition {
     pub name: String,
     pub offset: u64,
@@ -14,7 +16,7 @@ pub struct Partition {
 }
 
 /// Full scan report — serializable to JSON for resuming later
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanReport {
     pub image_size: u64,
     pub partitions: Vec<Partition>,
@@ -24,7 +26,10 @@ pub struct ScanReport {
 impl ScanReport {
     pub fn summary(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("Image size: {}\n", bytesize::ByteSize(self.image_size)));
+        out.push_str(&format!(
+            "Image size: {}\n",
+            bytesize::ByteSize(self.image_size)
+        ));
         out.push_str(&format!("Partitions found: {}\n", self.partitions.len()));
         out.push_str(&format!("Filesystems found: {}\n", self.filesystems.len()));
 
@@ -152,7 +157,11 @@ impl<'a> Scanner<'a> {
                 .filter_map(|c| {
                     if c.len() == 2 {
                         let ch = u16::from_le_bytes([c[0], c[1]]);
-                        if ch == 0 { None } else { char::from_u32(ch as u32) }
+                        if ch == 0 {
+                            None
+                        } else {
+                            char::from_u32(ch as u32)
+                        }
                     } else {
                         None
                     }
@@ -170,7 +179,11 @@ impl<'a> Scanner<'a> {
             };
 
             partitions.push(Partition {
-                name: if name.is_empty() { format!("p{}", i + 1) } else { name },
+                name: if name.is_empty() {
+                    format!("p{}", i + 1)
+                } else {
+                    name
+                },
                 offset: byte_offset,
                 size: byte_size,
                 fs_type,
@@ -213,9 +226,19 @@ impl<'a> Scanner<'a> {
 
         // Check each partition for a known filesystem at its start
         for part in &partitions {
-            tracing::info!("Checking partition {} at offset {}...", part.name, bytesize::ByteSize(part.offset));
+            tracing::info!(
+                "Checking partition {} at offset {}...",
+                part.name,
+                bytesize::ByteSize(part.offset)
+            );
             if let Some(info) = self.detect_filesystem(part.offset)? {
-                tracing::info!("Found {} \"{}\" ({}) on {}", info.fs_type, info.label, bytesize::ByteSize(info.total_size), part.name);
+                tracing::info!(
+                    "Found {} \"{}\" ({}) on {}",
+                    info.fs_type,
+                    info.label,
+                    bytesize::ByteSize(info.total_size),
+                    part.name
+                );
                 filesystems.push(info);
             }
         }
@@ -295,10 +318,7 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        tracing::info!(
-            "Deep scan complete: found {} filesystem(s)",
-            found.len()
-        );
+        tracing::info!("Deep scan complete: found {} filesystem(s)", found.len());
 
         Ok(found)
     }

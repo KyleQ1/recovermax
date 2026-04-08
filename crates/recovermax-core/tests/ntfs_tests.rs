@@ -1,8 +1,8 @@
+use recovermax_core::fs::ntfs;
+use recovermax_core::io::ImageReader;
+use recovermax_core::scan::Scanner;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use recovermax_core::io::ImageReader;
-use recovermax_core::fs::ntfs;
-use recovermax_core::scan::Scanner;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -132,8 +132,7 @@ fn build_mft_entry(
         .copy_from_slice(&(fn_content_size as u32).to_le_bytes());
     // Content offset (relative to attribute start)
     let fn_content_offset: u16 = 0x18;
-    entry[attr_pos + 0x14..attr_pos + 0x16]
-        .copy_from_slice(&fn_content_offset.to_le_bytes());
+    entry[attr_pos + 0x14..attr_pos + 0x16].copy_from_slice(&fn_content_offset.to_le_bytes());
 
     let content_start = attr_pos + fn_content_offset as usize;
 
@@ -161,19 +160,15 @@ fn build_mft_entry(
         let data_attr_size = ((run_offset as usize + data_runs.len()) + 7) & !7;
 
         entry[attr_pos..attr_pos + 4].copy_from_slice(&ATTR_TYPE_DATA.to_le_bytes());
-        entry[attr_pos + 4..attr_pos + 8]
-            .copy_from_slice(&(data_attr_size as u32).to_le_bytes());
+        entry[attr_pos + 4..attr_pos + 8].copy_from_slice(&(data_attr_size as u32).to_le_bytes());
         // Non-resident flag
         entry[attr_pos + 8] = 1;
         // Data runs offset
-        entry[attr_pos + 0x20..attr_pos + 0x22]
-            .copy_from_slice(&run_offset.to_le_bytes());
+        entry[attr_pos + 0x20..attr_pos + 0x22].copy_from_slice(&run_offset.to_le_bytes());
         // Real size (logical file size) at offset 0x30
-        entry[attr_pos + 0x30..attr_pos + 0x38]
-            .copy_from_slice(&file_size.to_le_bytes());
+        entry[attr_pos + 0x30..attr_pos + 0x38].copy_from_slice(&file_size.to_le_bytes());
         // Initialized size at offset 0x38
-        entry[attr_pos + 0x38..attr_pos + 0x40]
-            .copy_from_slice(&file_size.to_le_bytes());
+        entry[attr_pos + 0x38..attr_pos + 0x40].copy_from_slice(&file_size.to_le_bytes());
 
         // Data runs
         let run_start = attr_pos + run_offset as usize;
@@ -186,8 +181,7 @@ fn build_mft_entry(
         let data_attr_size = ((24 + content_size) + 7) & !7;
 
         entry[attr_pos..attr_pos + 4].copy_from_slice(&ATTR_TYPE_DATA.to_le_bytes());
-        entry[attr_pos + 4..attr_pos + 8]
-            .copy_from_slice(&(data_attr_size as u32).to_le_bytes());
+        entry[attr_pos + 4..attr_pos + 8].copy_from_slice(&(data_attr_size as u32).to_le_bytes());
         // Non-resident flag (0 = resident)
         entry[attr_pos + 8] = 0;
         // Content length
@@ -195,8 +189,7 @@ fn build_mft_entry(
             .copy_from_slice(&(content_size as u32).to_le_bytes());
         // Content offset
         let data_content_offset: u16 = 0x18;
-        entry[attr_pos + 0x14..attr_pos + 0x16]
-            .copy_from_slice(&data_content_offset.to_le_bytes());
+        entry[attr_pos + 0x14..attr_pos + 0x16].copy_from_slice(&data_content_offset.to_le_bytes());
 
         // Fill with recognizable pattern
         let content_off = attr_pos + data_content_offset as usize;
@@ -617,18 +610,15 @@ fn ntfs_fs_list_root_skips_metafiles() {
 
     // Entry 1: regular file (should be listed)
     let entry1 = build_mft_entry(1, 0x01, "readme.txt", 5, 100, &[]);
-    img[mft_offset + MFT_ENTRY_SIZE..mft_offset + 2 * MFT_ENTRY_SIZE]
-        .copy_from_slice(&entry1);
+    img[mft_offset + MFT_ENTRY_SIZE..mft_offset + 2 * MFT_ENTRY_SIZE].copy_from_slice(&entry1);
 
     // Entry 2: $LogFile (system metafile, should be skipped)
     let entry2 = build_mft_entry(2, 0x01, "$LogFile", 5, 0, &[]);
-    img[mft_offset + 2 * MFT_ENTRY_SIZE..mft_offset + 3 * MFT_ENTRY_SIZE]
-        .copy_from_slice(&entry2);
+    img[mft_offset + 2 * MFT_ENTRY_SIZE..mft_offset + 3 * MFT_ENTRY_SIZE].copy_from_slice(&entry2);
 
     // Entry 3: directory (should be listed)
     let entry3 = build_mft_entry(3, 0x03, "Documents", 5, 0, &[]);
-    img[mft_offset + 3 * MFT_ENTRY_SIZE..mft_offset + 4 * MFT_ENTRY_SIZE]
-        .copy_from_slice(&entry3);
+    img[mft_offset + 3 * MFT_ENTRY_SIZE..mft_offset + 4 * MFT_ENTRY_SIZE].copy_from_slice(&entry3);
 
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
@@ -636,14 +626,20 @@ fn ntfs_fs_list_root_skips_metafiles() {
     let entries = fs.list_root().unwrap();
 
     // list_directory adds . and .. entries
-    let non_dot: Vec<_> = entries.iter().filter(|e| e.name != "." && e.name != "..").collect();
+    let non_dot: Vec<_> = entries
+        .iter()
+        .filter(|e| e.name != "." && e.name != "..")
+        .collect();
     assert_eq!(non_dot.len(), 2);
     assert_eq!(non_dot[0].name, "readme.txt");
     assert_eq!(non_dot[0].inode, 1);
     assert_eq!(non_dot[0].size, 100);
     assert_eq!(non_dot[1].name, "Documents");
     assert_eq!(non_dot[1].inode, 3);
-    assert_eq!(non_dot[1].file_type, recovermax_core::fs::FileType::Directory);
+    assert_eq!(
+        non_dot[1].file_type,
+        recovermax_core::fs::FileType::Directory
+    );
 }
 
 #[test]
@@ -659,15 +655,17 @@ fn ntfs_fs_list_root_skips_deleted() {
 
     // Entry 1: active file
     let entry1 = build_mft_entry(1, 0x01, "active.txt", 5, 100, &[]);
-    img[mft_offset + MFT_ENTRY_SIZE..mft_offset + 2 * MFT_ENTRY_SIZE]
-        .copy_from_slice(&entry1);
+    img[mft_offset + MFT_ENTRY_SIZE..mft_offset + 2 * MFT_ENTRY_SIZE].copy_from_slice(&entry1);
 
     let f = create_test_image(&img);
     let reader = ImageReader::open(f.path()).unwrap();
     let fs = ntfs::NtfsFs::new(&reader, 0).unwrap();
     let entries = fs.list_root().unwrap();
 
-    let non_dot: Vec<_> = entries.iter().filter(|e| e.name != "." && e.name != "..").collect();
+    let non_dot: Vec<_> = entries
+        .iter()
+        .filter(|e| e.name != "." && e.name != "..")
+        .collect();
     assert_eq!(non_dot.len(), 1);
     assert_eq!(non_dot[0].name, "active.txt");
 }
@@ -714,7 +712,14 @@ fn ntfs_fs_read_file_nonresident() {
     // header 0x21 = 1 byte length, 2 bytes offset
     let data_runs = [0x21, 0x01, 0xC8, 0x00, 0x00];
 
-    let entry = build_mft_entry(0, 0x01, "hello.txt", 5, file_content.len() as u64, &data_runs);
+    let entry = build_mft_entry(
+        0,
+        0x01,
+        "hello.txt",
+        5,
+        file_content.len() as u64,
+        &data_runs,
+    );
     img[mft_offset..mft_offset + MFT_ENTRY_SIZE].copy_from_slice(&entry);
 
     let f = create_test_image(&img);

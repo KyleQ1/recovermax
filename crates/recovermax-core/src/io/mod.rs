@@ -13,8 +13,8 @@ pub struct ImageReader {
 
 impl ImageReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
 
         let metadata = file.metadata()?;
         let size = metadata.len();
@@ -59,7 +59,9 @@ impl ImageReader {
         if data.len() < N {
             anyhow::bail!(
                 "Short read at offset {}: wanted {} bytes, got {}",
-                offset, N, data.len()
+                offset,
+                N,
+                data.len()
             );
         }
         let mut arr = [0u8; N];

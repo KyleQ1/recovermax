@@ -13,16 +13,42 @@ pub struct CaseInfo {
 /// What action was performed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditAction {
-    ImageOpened { path: String, size: u64, sha256: Option<String> },
+    ImageOpened {
+        path: String,
+        size: u64,
+        sha256: Option<String>,
+    },
     ScanStarted,
-    ScanCompleted { partitions: usize, filesystems: usize },
-    FileRecovered { inode: u64, path: String, size: u64, sha256: String },
-    DirectoryRecovered { path: String, file_count: usize },
-    CarveStarted { types: Vec<String> },
-    CarveCompleted { files_found: usize },
-    DeletedScan { deleted_count: usize },
-    ImageVerified { sha256: String, matched: bool },
-    Error { message: String },
+    ScanCompleted {
+        partitions: usize,
+        filesystems: usize,
+    },
+    FileRecovered {
+        inode: u64,
+        path: String,
+        size: u64,
+        sha256: String,
+    },
+    DirectoryRecovered {
+        path: String,
+        file_count: usize,
+    },
+    CarveStarted {
+        types: Vec<String>,
+    },
+    CarveCompleted {
+        files_found: usize,
+    },
+    DeletedScan {
+        deleted_count: usize,
+    },
+    ImageVerified {
+        sha256: String,
+        matched: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// A single audit log entry
@@ -103,7 +129,10 @@ mod tests {
             sha256: Some("abc123".into()),
         });
         log.log(AuditAction::ScanStarted);
-        log.log(AuditAction::ScanCompleted { partitions: 3, filesystems: 2 });
+        log.log(AuditAction::ScanCompleted {
+            partitions: 3,
+            filesystems: 2,
+        });
 
         assert_eq!(log.entries.len(), 3);
     }

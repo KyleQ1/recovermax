@@ -1,10 +1,10 @@
 //! Tests for streaming recovery: stream_inode_data writes blocks to a Write sink
 //! incrementally instead of buffering the entire file in memory.
 
+use recovermax_core::fs::ext4::Ext4Fs;
+use recovermax_core::io::ImageReader;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use recovermax_core::io::ImageReader;
-use recovermax_core::fs::ext4::Ext4Fs;
 
 fn create_test_image(data: &[u8]) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
@@ -25,7 +25,13 @@ impl Ext4ImageBuilder {
     fn new(size_blocks: u64) -> Self {
         let block_size = 4096u32;
         let data = vec![0u8; (size_blocks * block_size as u64) as usize];
-        Self { data, block_size, inode_size: 256, inode_table_block: 3, inodes_per_group: 256 }
+        Self {
+            data,
+            block_size,
+            inode_size: 256,
+            inode_table_block: 3,
+            inodes_per_group: 256,
+        }
     }
 
     fn write_superblock(&mut self, label: &str) {
@@ -56,9 +62,17 @@ impl Ext4ImageBuilder {
         self.write_u32(off + 40, (inode_table_block >> 32) as u32);
     }
 
-    fn write_inode_with_extent(&mut self, inode_num: u64, mode: u16, size: u64, data_block: u64, block_count: u16) {
+    fn write_inode_with_extent(
+        &mut self,
+        inode_num: u64,
+        mode: u16,
+        size: u64,
+        data_block: u64,
+        block_count: u16,
+    ) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
-        let off = self.inode_table_block as usize * self.block_size as usize + index as usize * self.inode_size as usize;
+        let off = self.inode_table_block as usize * self.block_size as usize
+            + index as usize * self.inode_size as usize;
         self.write_u16(off, mode);
         self.write_u32(off + 4, size as u32);
         self.write_u32(off + 108, (size >> 32) as u32);
@@ -77,7 +91,8 @@ impl Ext4ImageBuilder {
 
     fn write_inode_with_blockmap(&mut self, inode_num: u64, mode: u16, size: u64, blocks: &[u32]) {
         let index = (inode_num - 1) % self.inodes_per_group as u64;
-        let off = self.inode_table_block as usize * self.block_size as usize + index as usize * self.inode_size as usize;
+        let off = self.inode_table_block as usize * self.block_size as usize
+            + index as usize * self.inode_size as usize;
         self.write_u16(off, mode);
         self.write_u32(off + 4, size as u32);
         self.write_u32(off + 108, (size >> 32) as u32);
@@ -102,7 +117,9 @@ impl Ext4ImageBuilder {
         self.data[off..off + 4].copy_from_slice(&val.to_le_bytes());
     }
 
-    fn build(self) -> Vec<u8> { self.data }
+    fn build(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 // ===========================================================================
@@ -256,8 +273,11 @@ fn stream_file_with_indirect_blocks() {
     // Verify direct blocks
     for i in 0..12 {
         assert!(
-            streamed[i * 4096..(i + 1) * 4096].iter().all(|&b| b == i as u8),
-            "Direct block {} wrong", i
+            streamed[i * 4096..(i + 1) * 4096]
+                .iter()
+                .all(|&b| b == i as u8),
+            "Direct block {} wrong",
+            i
         );
     }
     // Verify indirect blocks
@@ -296,9 +316,18 @@ fn stream_sparse_file_preserves_holes() {
     assert_eq!(bytes_written, file_size as u64);
     assert_eq!(streamed.len(), file_size);
     // First block is a hole — should be all zeros
-    assert!(streamed[0..4096].iter().all(|&b| b == 0), "Hole should be zeros");
-    assert!(streamed[4096..8192].iter().all(|&b| b == 0xAA), "Block 2 wrong");
-    assert!(streamed[8192..12288].iter().all(|&b| b == 0xBB), "Block 3 wrong");
+    assert!(
+        streamed[0..4096].iter().all(|&b| b == 0),
+        "Hole should be zeros"
+    );
+    assert!(
+        streamed[4096..8192].iter().all(|&b| b == 0xAA),
+        "Block 2 wrong"
+    );
+    assert!(
+        streamed[8192..12288].iter().all(|&b| b == 0xBB),
+        "Block 3 wrong"
+    );
 }
 
 // ===========================================================================
@@ -447,7 +476,10 @@ fn stream_matches_read_inode_data_sparse() {
     let mut streamed = Vec::new();
     fs.stream_inode_data(&inode, &mut streamed).unwrap();
 
-    assert_eq!(buffered, streamed, "Streamed data must match buffered read for sparse files");
+    assert_eq!(
+        buffered, streamed,
+        "Streamed data must match buffered read for sparse files"
+    );
 }
 
 // ===========================================================================

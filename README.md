@@ -8,7 +8,7 @@ High-performance data recovery tool for ext4 and NTFS disk images, written in Ru
 
 ## What It Does
 
-RecoverMax reads raw disk images and recovers files from damaged or reformatted ext4 and NTFS filesystems. It provides an interactive shell for browsing filesystem trees, inspecting files, and selectively recovering data -- all without mounting the image. Streaming I/O means it handles multi-TB images without running out of memory.
+RecoverMax reads raw disk images and recovers files from damaged or reformatted ext4 and NTFS filesystems. It provides a terminal UI plus one-shot commands for browsing filesystem trees, inspecting files, and selectively recovering data -- all without mounting the image. Streaming I/O means it handles multi-TB images without running out of memory.
 
 ## Demo
 
@@ -57,11 +57,11 @@ boot sector parsing, MFT entry walking, data run decoding, file content reading
 **Performance:**
 mmap-based zero-copy I/O, sector-aligned scanning, streaming recovery for multi-TB images
 
-**Interactive shell:**
-`ls`, `cd`, `tree`, `cat`, `hexdump`, `recover`, `deleted`, `carve`, `mount`
+**Terminal UI:**
+image picker, saved scan reopen, `search`, `searchfs`, `save`, plus lightweight interactive search workflows over discovered filesystems
 
 **One-shot CLI:**
-scriptable subcommands for automated recovery pipelines
+scriptable subcommands for automated recovery pipelines, including saved scan reuse and path search
 
 ## Installation
 
@@ -83,19 +83,28 @@ The binary will be at `target/release/recovermax-cli`.
 
 ### Interactive mode
 
-Open an image and explore interactively:
+Open the terminal UI image picker:
+
+```bash
+recovermax
+```
+
+Open a specific image directly in the terminal UI:
 
 ```bash
 recovermax /path/to/image.img
 ```
 
+The image picker also lists `.scn` saved scan artifacts and can reopen them when the matching source image is present nearby.
+
 ### One-shot commands
 
 ```bash
 recovermax info <image>                              # image metadata
-recovermax scan <image> -o scan.json                 # find partitions and filesystems
+recovermax scan <image> -o scan.scn                  # find partitions and filesystems
+recovermax search <image> /data/ming -s scan.scn     # search ext4 paths using saved scan
 recovermax recover <image> -d /dest -p /home/user    # recover a path
-recovermax recover <image> -d /dest -s scan.json     # recover using saved scan
+recovermax recover <image> -d /dest -s scan.scn      # recover using saved scan
 recovermax carve <image> -d /dest -t jpg,png,pdf     # raw carve by signature
 recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
 ```
@@ -120,6 +129,9 @@ cargo test --test carve_tests    # file carving
 cargo test --test scan_tests     # partition detection
 ```
 
+For the broader validation workflow, dataset inventory, and manifest conventions, see [testing/README.md](/Users/kylequinlan/Workspace/recovermax/testing/README.md).
+For a concrete malformed-image case study, see [testing/datasets/cfreds-dfr-01-ext/notes.md](/Users/kylequinlan/Workspace/recovermax/testing/datasets/cfreds-dfr-01-ext/notes.md).
+
 ## Project Structure
 
 ```
@@ -132,10 +144,10 @@ crates/
 │   │   ├── carve/       # Raw file carving engine
 │   │   └── recover/     # Tree-walk file recovery
 │   └── tests/           # Integration tests
-└── recovermax-cli/      # Binary: interactive shell + one-shot CLI
+└── recovermax-cli/      # Binary: terminal UI + one-shot CLI
     └── src/
         ├── main.rs      # Entry point
-        ├── shell.rs     # Interactive REPL
+        ├── tui.rs       # Image picker + interactive search UI
         └── cli.rs       # One-shot subcommands
 ```
 
