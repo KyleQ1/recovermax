@@ -257,13 +257,17 @@ impl<'a> SessionShell<'a> {
         println!("Filesystems:");
         for (i, fs) in self.session.filesystems().iter().enumerate() {
             let mut tree_state = if fs.has_tree() {
-                "tree".to_string()
+                if fs.has_partial_tree() {
+                    format!("partial tree; warnings: {}", fs.warnings.len())
+                } else {
+                    "tree".to_string()
+                }
             } else if self.session.attached_reader().is_some() && fs.fs_info.fs_type == "ext4" {
                 "report-only; live-fallback".to_string()
             } else {
                 "report".to_string()
             };
-            if !fs.warnings.is_empty() {
+            if !fs.has_partial_tree() && !fs.warnings.is_empty() {
                 tree_state.push_str(&format!("; warnings: {}", fs.warnings.len()));
             }
             println!(
@@ -843,7 +847,10 @@ mod tests {
             parent_inode: Some(2),
             timestamps: None,
         };
-        assert_eq!(format_node_brief(&node), "f - /ghost.txt [deleted] [slack]");
+        assert_eq!(
+            format_node_brief(&node, false),
+            "f - /ghost.txt [deleted] [slack]"
+        );
     }
 
     #[test]
@@ -881,9 +888,28 @@ mod tests {
             }),
         };
         assert_eq!(
-            format_node_brief(&node),
+            format_node_brief(&node, false),
             "f 712 B /$OrphanFiles/OrphanFile-13 [deleted] [orphan]"
         );
+    }
+
+    #[test]
+    fn format_node_brief_marks_partial_directories() {
+        let node = SessionNode {
+            id: 9,
+            parent_id: Some(1),
+            filesystem_index: 0,
+            inode: Some(12),
+            basename: "broken".to_string(),
+            path: "/broken".to_string(),
+            file_type: FileType::Directory,
+            deleted: false,
+            size: Some(4096),
+            source: EntrySource::Filesystem,
+            parent_inode: Some(2),
+            timestamps: None,
+        };
+        assert_eq!(format_node_brief(&node, true), "d 4.0 KiB /broken [partial]");
     }
 
     #[test]
