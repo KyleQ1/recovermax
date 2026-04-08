@@ -491,6 +491,9 @@ impl<'a> Scanner<'a> {
             if offset != part_offset {
                 if let Some(info) = self.detect_filesystem(offset)? {
                     found.push(info);
+                    // Found a filesystem — return immediately rather than
+                    // scanning the entire multi-TB partition
+                    return Ok(found);
                 }
             }
 
