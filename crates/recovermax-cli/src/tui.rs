@@ -909,7 +909,10 @@ mod tests {
             parent_inode: Some(2),
             timestamps: None,
         };
-        assert_eq!(format_node_brief(&node, true), "d 4.0 KiB /broken [partial]");
+        assert_eq!(
+            format_node_brief(&node, true),
+            "d 4.0 KiB /broken [partial]"
+        );
     }
 
     #[test]

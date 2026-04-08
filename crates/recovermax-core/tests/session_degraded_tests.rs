@@ -98,3 +98,23 @@ fn report_only_session_has_predictable_degraded_runtime_behavior() {
     assert!(session.list_children(0, "/").is_err());
     assert!(session.walk_tree(0, "/", 8).is_err());
 }
+
+#[test]
+fn filesystem_warnings_match_structured_and_legacy_paths() {
+    let image = create_test_image();
+    let mut artifact = report_only_artifact(image.path());
+    artifact.filesystems[0].warnings = vec![
+        "path /: failed to read root directory: short read".to_string(),
+        "failed to read directory /broken (inode 12): io error".to_string(),
+    ];
+
+    let filesystem = &artifact.filesystems[0];
+    assert_eq!(
+        filesystem.warnings_for_path("/"),
+        vec!["path /: failed to read root directory: short read"]
+    );
+    assert_eq!(
+        filesystem.warnings_for_path("/broken"),
+        vec!["failed to read directory /broken (inode 12): io error"]
+    );
+}
