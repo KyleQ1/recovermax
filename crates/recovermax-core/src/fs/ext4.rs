@@ -91,32 +91,63 @@ const BACKUP_SUPERBLOCK_OFFSETS: &[u64] = &[
     8 * 1024 * 1024 + 1024,
 ];
 
+/// Result of superblock parsing — includes which block group the superblock was found in.
+struct SuperblockResult {
+    superblock: Ext4Superblock,
+    /// The block group where the superblock was found (0 = primary).
+    found_in_group: u64,
+}
+
 /// Parse an ext4 superblock, trying backup locations if the primary is corrupt.
 pub fn parse_superblock(reader: &dyn DiskRead, partition_offset: u64) -> Result<Ext4Superblock> {
+    parse_superblock_with_group(reader, partition_offset).map(|r| r.superblock)
+}
+
+fn parse_superblock_with_group(
+    reader: &dyn DiskRead,
+    partition_offset: u64,
+) -> Result<SuperblockResult> {
     // Try primary first
     if let Ok(sb) = parse_superblock_at_offset(reader, partition_offset + SUPERBLOCK_OFFSET) {
-        return Ok(sb);
+        return Ok(SuperblockResult {
+            superblock: sb,
+            found_in_group: 0,
+        });
     }
 
-    // Try backup locations
-    for &backup_offset in BACKUP_SUPERBLOCK_OFFSETS {
+    // Try backup locations — compute which group each offset corresponds to
+    // Default: block_size=4096, blocks_per_group=32768 → group_size = 128 MiB
+    let backup_groups: &[(u64, u64)] = &[
+        (128 * 1024 * 1024 + 1024, 1),  // group 1
+        (3 * 128 * 1024 * 1024 + 1024, 3),
+        (5 * 128 * 1024 * 1024 + 1024, 5),
+        (7 * 128 * 1024 * 1024 + 1024, 7),
+        (9 * 128 * 1024 * 1024 + 1024, 9),
+        (8 * 1024 * 1024 + 1024, 1),  // 1K blocks
+    ];
+
+    for &(backup_offset, group) in backup_groups {
         let abs_offset = partition_offset + backup_offset;
         if abs_offset + 1024 > reader.len() {
             continue;
         }
         if let Ok(sb) = parse_superblock_at_offset(reader, abs_offset) {
             tracing::info!(
-                "Primary superblock corrupt; using backup at partition offset {}",
-                backup_offset
+                "Primary superblock corrupt; using backup from group {} at partition offset {}",
+                group,
+                bytesize::ByteSize(backup_offset)
             );
-            return Ok(sb);
+            return Ok(SuperblockResult {
+                superblock: sb,
+                found_in_group: group,
+            });
         }
     }
 
     anyhow::bail!(
         "No valid ext4 superblock found at partition offset {} (tried primary + {} backup locations)",
         partition_offset,
-        BACKUP_SUPERBLOCK_OFFSETS.len()
+        backup_groups.len()
     )
 }
 
@@ -220,15 +251,19 @@ pub struct Ext4Fs<'a> {
     reader: &'a dyn DiskRead,
     pub superblock: Ext4Superblock,
     partition_offset: u64,
+    /// The block group where the superblock was found (0 = primary).
+    /// Used to locate the backup BGD table when the primary is corrupt.
+    sb_group: u64,
 }
 
 impl<'a> Ext4Fs<'a> {
     pub fn new(reader: &'a dyn DiskRead, partition_offset: u64) -> Result<Self> {
-        let superblock = parse_superblock(reader, partition_offset)?;
+        let result = parse_superblock_with_group(reader, partition_offset)?;
         Ok(Self {
             reader,
-            superblock,
+            superblock: result.superblock,
             partition_offset,
+            sb_group: result.found_in_group,
         })
     }
 
@@ -244,13 +279,25 @@ impl<'a> Ext4Fs<'a> {
         self.reader.read_at_exact(offset, size)
     }
 
-    /// Get the block group descriptor table offset
+    /// Get the block group descriptor table offset.
+    /// When using a backup superblock, reads BGD from the backup location
+    /// in the same block group, falling back to primary if backup fails.
     fn bgdt_offset(&self) -> u64 {
-        let bs = self.superblock.block_size();
-        if bs == 1024 {
-            self.partition_offset + 2048 // block 2
+        let bs = self.superblock.block_size() as u64;
+        let bpg = self.superblock.blocks_per_group as u64;
+
+        if self.sb_group == 0 {
+            // Primary: BGD at block 1 (4K) or block 2 (1K)
+            if bs == 1024 {
+                self.partition_offset + 2048
+            } else {
+                self.partition_offset + bs
+            }
         } else {
-            self.partition_offset + bs as u64 // block 1
+            // Backup: BGD follows the backup superblock in the same group
+            let group_start_block = self.sb_group * bpg;
+            let bgd_block = group_start_block + 1; // BGD is always the next block after SB
+            self.partition_offset + bgd_block * bs
         }
     }
 
