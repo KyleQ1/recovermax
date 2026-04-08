@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{
     deleted_recovery_hint_message, filesystem_has_tree, list_children_with_fallback,
-    recover_with_fallback, resolve_node_with_fallback, resolve_recovery_target,
-    search_with_fallback, walk_tree_with_fallback,
+    print_traversal_warnings, recover_with_fallback, resolve_node_with_fallback,
+    resolve_recovery_target, search_with_fallback, traversal_warnings, walk_tree_with_fallback,
 };
 use anyhow::{anyhow, Context, Result};
 use recovermax_core::fs::EntrySource;
@@ -211,6 +211,7 @@ impl<'a> SessionShell<'a> {
                 "ls" => self.command_ls(line)?,
                 "tree" => self.command_tree(line)?,
                 "stat" => self.command_stat(line)?,
+                "warnings" => self.command_warnings(line)?,
                 "search" => self.command_search(line, None)?,
                 "searchfs" => self.command_searchfs(line)?,
                 "recover" => self.command_recover(line)?,
@@ -242,6 +243,7 @@ impl<'a> SessionShell<'a> {
         println!("  ls [path]              List directory entries");
         println!("  tree [path] [depth]    Print a browsable tree");
         println!("  stat <path|inode>      Show node metadata");
+        println!("  warnings [path]        Show traversal warnings");
         println!("  search <query>         Search the session tree");
         println!("  searchfs <idx> <q>     Search one filesystem");
         println!("  recover <dest> [path]  Recover current path or a specific target");
@@ -386,6 +388,22 @@ impl<'a> SessionShell<'a> {
         let resolved = self.resolve_path(&query);
         let node = resolve_node_with_fallback(self.session, self.current_fs, &resolved)?;
         self.print_stat(&node);
+        Ok(())
+    }
+
+    fn command_warnings(&mut self, line: &str) -> Result<()> {
+        let arg = command_arg(line, "warnings");
+        let path = if arg.is_empty() {
+            None
+        } else {
+            Some(self.resolve_path(arg))
+        };
+        let warnings = traversal_warnings(
+            self.session.artifact(),
+            Some(self.current_fs),
+            path.as_deref(),
+        )?;
+        print_traversal_warnings(&warnings, Some(self.current_fs));
         Ok(())
     }
 

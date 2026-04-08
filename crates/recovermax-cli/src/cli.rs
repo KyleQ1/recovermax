@@ -11,8 +11,8 @@ use recovermax_core::recover;
 use recovermax_core::scan::{ScanOptions, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions, Searcher};
 use recovermax_core::session::{
-    CacheSummary, RecoverySession, RecoverySessionArtifact, SessionNode, SessionNodeTimestamps,
-    SessionTreeEntry,
+    CacheSummary, FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, SessionNode,
+    SessionNodeTimestamps, SessionTreeEntry,
 };
 
 pub struct Args {
@@ -122,6 +122,28 @@ pub enum Command {
         /// Limit browsing to one filesystem index
         #[arg(long)]
         fs: Option<usize>,
+
+        /// Memory budget for RecoverMax-managed caches
+        #[arg(long)]
+        memory_budget: Option<String>,
+    },
+
+    /// Show traversal warnings for degraded or partial sessions
+    Warnings {
+        /// Path to disk image or block device
+        image: PathBuf,
+
+        /// Load a previous scan/session file instead of re-scanning
+        #[arg(short, long)]
+        scan_file: Option<PathBuf>,
+
+        /// Limit warnings to one filesystem index
+        #[arg(long)]
+        fs: Option<usize>,
+
+        /// Limit warnings to one path
+        #[arg(short, long)]
+        path: Option<String>,
 
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
@@ -336,6 +358,23 @@ pub fn run(args: Args) -> Result<()> {
             let node = resolve_node_for_session(&mut session, fs, &target)?;
             print_stat_node(&node, session.artifact());
             print_deleted_recovery_hint(&session, &node);
+            Ok(())
+        }
+        Command::Warnings {
+            image,
+            scan_file,
+            fs,
+            path,
+            memory_budget,
+        } => {
+            let session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
+            let warnings = traversal_warnings(session.artifact(), fs, path.as_deref())?;
+            print_traversal_warnings(&warnings, fs);
             Ok(())
         }
         Command::Recover {
@@ -1633,6 +1672,61 @@ fn print_stat_node(node: &SessionNode, artifact: &RecoverySessionArtifact) {
             for warning in warnings {
                 println!("Traversal warning: {}", warning);
             }
+        }
+    }
+}
+
+pub(crate) fn traversal_warnings(
+    artifact: &RecoverySessionArtifact,
+    filesystem_index: Option<usize>,
+    path: Option<&str>,
+) -> Result<Vec<(usize, String)>> {
+    if let Some(filesystem_index) = filesystem_index {
+        let filesystem = artifact
+            .filesystem_session(filesystem_index)
+            .with_context(|| format!("filesystem {} not found in session", filesystem_index))?;
+        return Ok(traversal_warnings_for_filesystem(filesystem, path)
+            .into_iter()
+            .map(|warning| (filesystem_index, warning.to_string()))
+            .collect());
+    }
+
+    let mut warnings = Vec::new();
+    for filesystem in &artifact.filesystems {
+        warnings.extend(
+            traversal_warnings_for_filesystem(filesystem, path)
+                .into_iter()
+                .map(|warning| (filesystem.filesystem_index, warning.to_string())),
+        );
+    }
+    Ok(warnings)
+}
+
+fn traversal_warnings_for_filesystem<'a>(
+    filesystem: &'a FilesystemSessionArtifact,
+    path: Option<&str>,
+) -> Vec<&'a str> {
+    match path {
+        Some(path) => filesystem.warnings_for_path(path),
+        None => filesystem.warnings.iter().map(String::as_str).collect(),
+    }
+}
+
+pub(crate) fn print_traversal_warnings(
+    warnings: &[(usize, String)],
+    filesystem_index: Option<usize>,
+) {
+    if warnings.is_empty() {
+        println!("No traversal warnings.");
+        return;
+    }
+
+    println!("Traversal warnings:");
+    for (fs_index, warning) in warnings {
+        if filesystem_index.is_some() {
+            println!("  {}", warning);
+        } else {
+            println!("  [fs {}] {}", fs_index, warning);
         }
     }
 }
@@ -3130,5 +3224,111 @@ mod tests {
         let (index, fs) = select_deleted_filesystem(&report, Some(1)).unwrap();
         assert_eq!(index, 1);
         assert_eq!(fs.label, "ext4");
+    }
+
+    #[test]
+    fn traversal_warnings_can_be_filtered_by_filesystem_and_path() {
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 8192,
+            },
+            report: ScanReport {
+                image_size: 8192,
+                partitions: vec![],
+                filesystems: vec![
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                ],
+            },
+            filesystems: vec![
+                FilesystemSessionArtifact {
+                    filesystem_index: 0,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    root_node_id: Some(1),
+                    warnings: vec![
+                        "path /: failed to read root directory: short read".to_string(),
+                        "failed to read directory /broken (inode 12): io error".to_string(),
+                    ],
+                    nodes: Vec::new(),
+                },
+                FilesystemSessionArtifact {
+                    filesystem_index: 1,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                    root_node_id: Some(2),
+                    warnings: vec![
+                        "failed to read directory /elsewhere (inode 22): stale".to_string()
+                    ],
+                    nodes: Vec::new(),
+                },
+            ],
+        };
+
+        let all = traversal_warnings(&artifact, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all
+            .iter()
+            .any(|entry| entry.0 == 0 && entry.1.contains("root directory")));
+        assert!(all
+            .iter()
+            .any(|entry| entry.0 == 1 && entry.1.contains("/elsewhere")));
+
+        let filtered = traversal_warnings(&artifact, Some(0), Some("/broken")).unwrap();
+        assert_eq!(
+            filtered,
+            vec![(
+                0,
+                "failed to read directory /broken (inode 12): io error".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn traversal_warnings_require_valid_filesystem_index() {
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 4096,
+            },
+            report: ScanReport {
+                image_size: 4096,
+                partitions: vec![],
+                filesystems: vec![],
+            },
+            filesystems: vec![],
+        };
+
+        let err = traversal_warnings(&artifact, Some(7), None).unwrap_err();
+        assert!(err.to_string().contains("filesystem 7 not found"));
     }
 }
