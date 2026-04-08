@@ -1044,22 +1044,22 @@ fn run_scan(
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            match state.current_phase {
-                ScanPhase::TreeBuilding => {
-                    progress_bar2.set_length(0);
-                    progress_bar2.set_position(0);
-                    progress_bar2.set_message(format!(
-                        " | Building file tree: {} entries{}",
-                        state.bytes_scanned,
-                        state.speed_str(),
-                    ));
-                    stats_bar2.set_message(format!(
-                        "Filesystems: {}",
-                        state.fs_summary(),
-                    ));
-                }
-                _ => {}
-            }
+            progress_bar2.set_style(
+                ProgressStyle::with_template(" {spinner:.green} {msg}")
+                    .unwrap(),
+            );
+            progress_bar2.set_message(format!(
+                "Building file tree: {} entries found{}",
+                state.bytes_scanned,
+                state.speed_str(),
+            ));
+            progress_bar2.tick();
+
+            stats_bar2.set_message(format!(
+                "Filesystems: {}",
+                state.fs_summary(),
+            ));
+            stats_bar2.tick();
         };
 
         let artifact = RecoverySessionArtifact::from_scan_with_callback(
