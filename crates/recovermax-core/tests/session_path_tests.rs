@@ -23,6 +23,7 @@ fn sample_report(image_size: u64) -> ScanReport {
             block_size: 4096,
             total_size: image_size,
             offset: 0,
+                    lvm_map: None,
         }],
     }
 }

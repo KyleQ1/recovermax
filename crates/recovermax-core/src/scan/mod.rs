@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::fs::{self, FsInfo};
+use crate::fs::{self, FsInfo, LvmMap, LvmSegment};
 use crate::io::ImageReader;
 pub use crate::session::ScanImageSource;
 pub type ScanArtifact = crate::session::RecoverySessionArtifact;
@@ -54,11 +54,18 @@ pub struct ScanOptions {
     /// Run deep scan within partitions (walks every 1 MiB offset).
     /// Off by default — for multi-TB images this can take a very long time.
     pub deep_scan: bool,
+    /// Auto-escalate: when standard detection finds nothing, try PE-boundary
+    /// scanning (4 MiB steps for LVM partitions) then deep scan (1 MiB steps).
+    /// Default: true.
+    pub auto_escalate: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { deep_scan: false }
+        Self {
+            deep_scan: false,
+            auto_escalate: true,
+        }
     }
 }
 
@@ -209,6 +216,59 @@ impl<'a> Scanner<'a> {
             return Ok(Some(info));
         }
 
+        // Try LVM — if found, probe each LV for a filesystem
+        if let Some(lvs) = fs::lvm::detect(self.reader, offset) {
+            for lv in &lvs {
+                if lv.is_thin {
+                    tracing::info!(
+                        "Skipping thin pool/volume {}/{} — thin provisioning not yet supported. \
+                         PE-boundary scan or raw carving may still recover data within the thin pool.",
+                        lv.vg_name, lv.name
+                    );
+                    continue;
+                }
+                let lvm_map = LvmMap {
+                    pe_start_bytes: lv.pe_start_bytes,
+                    extent_size_bytes: lv.extent_size_bytes,
+                    segments: lv
+                        .segments
+                        .iter()
+                        .map(|s| LvmSegment {
+                            start_le: s.start_le,
+                            extent_count: s.extent_count,
+                            pv_start_pe: s.pv_start_pe,
+                        })
+                        .collect(),
+                };
+
+                if lv.segments.len() == 1 {
+                    // Fast path: single segment, compute offset directly
+                    let lv_offset = lv.disk_offset().unwrap();
+                    if let Some(mut info) = fs::ext4::detect(self.reader, lv_offset) {
+                        info.label = format!("{}/{}", lv.vg_name, lv.name);
+                        info.total_size = lv.total_size;
+                        info.lvm_map = Some(lvm_map);
+                        return Ok(Some(info));
+                    }
+                    if let Some(mut info) = fs::ntfs::detect(self.reader, lv_offset) {
+                        info.label = format!("{}/{}", lv.vg_name, lv.name);
+                        info.total_size = lv.total_size;
+                        info.lvm_map = Some(lvm_map);
+                        return Ok(Some(info));
+                    }
+                } else {
+                    // Multi-segment: use LvReader for virtual access
+                    let lv_reader = fs::lvm::LvReader::new(self.reader, lv);
+                    if let Some(mut info) = fs::ext4::detect(&lv_reader, 0) {
+                        info.label = format!("{}/{}", lv.vg_name, lv.name);
+                        info.total_size = lv.total_size;
+                        info.lvm_map = Some(lvm_map);
+                        return Ok(Some(info));
+                    }
+                }
+            }
+        }
+
         // TODO: try xfs, btrfs, etc.
 
         Ok(None)
@@ -250,10 +310,28 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        // Deep scan only runs when explicitly requested — for multi-TB images
-        // the 1 MiB-step walk can take hours.
-        if filesystems.is_empty() && options.deep_scan {
-            tracing::info!("No filesystems found at partition starts, running deep scan...");
+        // Escalation pipeline when nothing found at partition starts
+        if filesystems.is_empty() && options.auto_escalate {
+            // Phase 2: PE-boundary scan for LVM partitions (4 MiB steps — fast)
+            for part in &partitions {
+                if part.fs_type.contains("LVM") || part.fs_type.contains("lvm") {
+                    tracing::info!(
+                        "No filesystems found via LVM metadata on {}, trying PE-boundary scan...",
+                        part.name
+                    );
+                    let found = self.pe_boundary_scan(part.offset, part.size)?;
+                    for info in found {
+                        if !filesystems.iter().any(|f| f.offset == info.offset) {
+                            filesystems.push(info);
+                        }
+                    }
+                }
+            }
+        }
+
+        if filesystems.is_empty() && (options.deep_scan || options.auto_escalate) {
+            // Phase 3: Deep scan at 1 MiB steps (slow but thorough)
+            tracing::info!("No filesystems found, running deep scan...");
             for part in &partitions {
                 let found = self.deep_scan_partition(part.offset, part.size)?;
                 for info in found {
@@ -262,8 +340,13 @@ impl<'a> Scanner<'a> {
                     }
                 }
             }
-        } else if filesystems.is_empty() && !options.deep_scan {
-            tracing::info!("No filesystems found. Use --deep-scan to search within partitions (slow for large images).");
+        }
+
+        if filesystems.is_empty() {
+            tracing::info!(
+                "No filesystems found after all scan phases. \
+                 Raw file carving (recovermax carve) may still recover individual files."
+            );
         }
 
         Ok(ScanReport {
@@ -320,6 +403,49 @@ impl<'a> Scanner<'a> {
 
         tracing::info!("Deep scan complete: found {} filesystem(s)", found.len());
 
+        Ok(found)
+    }
+
+    /// Scan at PE-boundary offsets (every 4 MiB from pe_start) for ext4 superblocks.
+    /// Faster than deep scan for LVM partitions where metadata is destroyed.
+    fn pe_boundary_scan(&self, part_offset: u64, part_size: u64) -> Result<Vec<FsInfo>> {
+        let mut found = Vec::new();
+        let pe_size: u64 = 4 * 1024 * 1024; // default 4 MiB PE
+        let pe_start: u64 = 1024 * 1024; // default 1 MiB into partition
+        let end = part_offset + part_size;
+
+        let mut offset = part_offset + pe_start;
+        let mut pe_index = 0u64;
+
+        tracing::info!(
+            "PE-boundary scan: partition at {}, pe_start={}, pe_size={}, scanning up to {}...",
+            bytesize::ByteSize(part_offset),
+            bytesize::ByteSize(pe_start),
+            bytesize::ByteSize(pe_size),
+            bytesize::ByteSize(part_size)
+        );
+
+        while offset < end {
+            if let Some(info) = self.detect_filesystem(offset)? {
+                tracing::info!(
+                    "Found {} filesystem \"{}\" at PE boundary {} (offset {})",
+                    info.fs_type,
+                    info.label,
+                    pe_index,
+                    bytesize::ByteSize(offset)
+                );
+                found.push(info);
+                return Ok(found);
+            }
+            offset += pe_size;
+            pe_index += 1;
+
+            if pe_index % 1000 == 0 {
+                tracing::info!("PE scan: checked {} extents...", pe_index);
+            }
+        }
+
+        tracing::info!("PE-boundary scan complete: found {} filesystem(s)", found.len());
         Ok(found)
     }
 }

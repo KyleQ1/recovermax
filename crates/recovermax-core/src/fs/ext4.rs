@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{DirEntry, EntrySource, FileType, FsInfo};
-use crate::io::ImageReader;
+use crate::io::DiskRead;
 
 /// A deleted inode found by scanning inode tables
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,11 +74,56 @@ impl Ext4Superblock {
     }
 }
 
-/// Parse an ext4 superblock from a reader at a given partition offset
-pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<Ext4Superblock> {
-    let sb_offset = partition_offset + SUPERBLOCK_OFFSET;
+/// Common backup superblock offsets to try when the primary is corrupt.
+/// Assumes default ext4 parameters (block_size=4096, blocks_per_group=32768).
+const BACKUP_SUPERBLOCK_OFFSETS: &[u64] = &[
+    // Group 1: 4096 * 32768 + 1024 = 128 MiB + 1024
+    128 * 1024 * 1024 + 1024,
+    // Group 3: 384 MiB + 1024
+    3 * 128 * 1024 * 1024 + 1024,
+    // Group 5: 640 MiB + 1024
+    5 * 128 * 1024 * 1024 + 1024,
+    // Group 7: 896 MiB + 1024
+    7 * 128 * 1024 * 1024 + 1024,
+    // Group 9: 1152 MiB + 1024
+    9 * 128 * 1024 * 1024 + 1024,
+    // 1K block_size, blocks_per_group=8192 → group 1 at 8 MiB + 1024
+    8 * 1024 * 1024 + 1024,
+];
+
+/// Parse an ext4 superblock, trying backup locations if the primary is corrupt.
+pub fn parse_superblock(reader: &dyn DiskRead, partition_offset: u64) -> Result<Ext4Superblock> {
+    // Try primary first
+    if let Ok(sb) = parse_superblock_at_offset(reader, partition_offset + SUPERBLOCK_OFFSET) {
+        return Ok(sb);
+    }
+
+    // Try backup locations
+    for &backup_offset in BACKUP_SUPERBLOCK_OFFSETS {
+        let abs_offset = partition_offset + backup_offset;
+        if abs_offset + 1024 > reader.len() {
+            continue;
+        }
+        if let Ok(sb) = parse_superblock_at_offset(reader, abs_offset) {
+            tracing::info!(
+                "Primary superblock corrupt; using backup at partition offset {}",
+                backup_offset
+            );
+            return Ok(sb);
+        }
+    }
+
+    anyhow::bail!(
+        "No valid ext4 superblock found at partition offset {} (tried primary + {} backup locations)",
+        partition_offset,
+        BACKUP_SUPERBLOCK_OFFSETS.len()
+    )
+}
+
+/// Parse an ext4 superblock from an absolute byte offset in the image.
+fn parse_superblock_at_offset(reader: &dyn DiskRead, sb_offset: u64) -> Result<Ext4Superblock> {
     let data = reader
-        .read_at(sb_offset, 1024)
+        .read_at_exact(sb_offset, 1024)
         .context("Failed to read superblock")?;
 
     let magic = u16::from_le_bytes([data[0x38], data[0x39]]);
@@ -101,6 +146,24 @@ pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<E
     let inode_size = u16::from_le_bytes([data[0x58], data[0x59]]);
     let feature_incompat = u32::from_le_bytes(data[0x60..0x64].try_into()?);
     let journal_inum = u32::from_le_bytes(data[0xE0..0xE4].try_into()?);
+
+    // Validate critical fields
+    if log_block_size > 6 {
+        anyhow::bail!(
+            "Invalid ext4 log_block_size {} (max 6, would give {} byte blocks)",
+            log_block_size,
+            1024u64 << log_block_size
+        );
+    }
+    if blocks_per_group == 0 {
+        anyhow::bail!("Invalid ext4 blocks_per_group: 0");
+    }
+    if inodes_per_group == 0 {
+        anyhow::bail!("Invalid ext4 inodes_per_group: 0");
+    }
+    if inode_size == 0 || inode_size < 128 {
+        anyhow::bail!("Invalid ext4 inode_size: {}", inode_size);
+    }
 
     // 64-bit block counts
     let blocks_count_hi = u32::from_le_bytes(data[0x150..0x154].try_into()?);
@@ -138,7 +201,7 @@ pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<E
 }
 
 /// Detect if data at offset is an ext4 filesystem
-pub fn detect(reader: &ImageReader, offset: u64) -> Option<FsInfo> {
+pub fn detect(reader: &dyn DiskRead, offset: u64) -> Option<FsInfo> {
     let sb = parse_superblock(reader, offset).ok()?;
 
     Some(FsInfo {
@@ -148,18 +211,19 @@ pub fn detect(reader: &ImageReader, offset: u64) -> Option<FsInfo> {
         block_size: sb.block_size(),
         total_size: sb.total_size(),
         offset,
+        lvm_map: None,
     })
 }
 
 /// ext4 filesystem handle for reading inodes, directories, files
 pub struct Ext4Fs<'a> {
-    reader: &'a ImageReader,
+    reader: &'a dyn DiskRead,
     pub superblock: Ext4Superblock,
     partition_offset: u64,
 }
 
 impl<'a> Ext4Fs<'a> {
-    pub fn new(reader: &'a ImageReader, partition_offset: u64) -> Result<Self> {
+    pub fn new(reader: &'a dyn DiskRead, partition_offset: u64) -> Result<Self> {
         let superblock = parse_superblock(reader, partition_offset)?;
         Ok(Self {
             reader,
@@ -177,7 +241,7 @@ impl<'a> Ext4Fs<'a> {
     pub fn read_block(&self, block: u64) -> Result<&[u8]> {
         let offset = self.block_offset(block);
         let size = self.superblock.block_size() as usize;
-        self.reader.read_at(offset, size)
+        self.reader.read_at_exact(offset, size)
     }
 
     /// Get the block group descriptor table offset
@@ -219,12 +283,20 @@ impl<'a> Ext4Fs<'a> {
         let index = (inode_num - 1) % inodes_per_group;
 
         let bg = self.read_group_descriptor(group)?;
+        if bg.inode_table >= self.superblock.blocks_count {
+            anyhow::bail!(
+                "Block group {} inode table at block {} is beyond filesystem ({} blocks)",
+                group,
+                bg.inode_table,
+                self.superblock.blocks_count
+            );
+        }
         let inode_offset =
             self.block_offset(bg.inode_table) + index * self.superblock.inode_size as u64;
 
         let data = self
             .reader
-            .read_at(inode_offset, self.superblock.inode_size as usize)?;
+            .read_at_exact(inode_offset, self.superblock.inode_size as usize)?;
 
         let mode = u16::from_le_bytes(data[0..2].try_into()?);
         let atime = u32::from_le_bytes(data[8..12].try_into()?);
@@ -292,7 +364,8 @@ impl<'a> Ext4Fs<'a> {
     }
 
     fn read_extent_data(&self, inode: &Inode) -> Result<Vec<u8>> {
-        let mut result = Vec::with_capacity(inode.size as usize);
+        let cap = (inode.size).min(self.reader.len()) as usize;
+        let mut result = Vec::with_capacity(cap);
         let extents = self.parse_extent_tree(&inode.block_data)?;
 
         for extent in &extents {
@@ -325,6 +398,24 @@ impl<'a> Ext4Fs<'a> {
     }
 
     fn parse_extent_tree(&self, data: &[u8]) -> Result<Vec<Extent>> {
+        self.parse_extent_tree_recursive(data, 0)
+    }
+
+    const MAX_EXTENT_DEPTH: u8 = 5;
+
+    fn parse_extent_tree_recursive(
+        &self,
+        data: &[u8],
+        current_depth: u8,
+    ) -> Result<Vec<Extent>> {
+        if current_depth > Self::MAX_EXTENT_DEPTH {
+            anyhow::bail!(
+                "Extent tree depth {} exceeds maximum {}",
+                current_depth,
+                Self::MAX_EXTENT_DEPTH
+            );
+        }
+
         // Extent header
         let magic = u16::from_le_bytes([data[0], data[1]]);
         if magic != 0xF30A {
@@ -333,6 +424,10 @@ impl<'a> Ext4Fs<'a> {
 
         let entries = u16::from_le_bytes([data[2], data[3]]);
         let depth = u16::from_le_bytes([data[6], data[7]]);
+
+        // Cap entries at what physically fits in the data
+        let max_entries = ((data.len().saturating_sub(12)) / 12) as u16;
+        let entries = entries.min(max_entries);
 
         let mut extents = Vec::new();
 
@@ -365,7 +460,8 @@ impl<'a> Ext4Fs<'a> {
                 let leaf_block = (leaf_hi as u64) << 32 | leaf_lo as u64;
 
                 let block_data = self.read_block(leaf_block)?;
-                let sub_extents = self.parse_extent_tree(block_data)?;
+                let sub_extents =
+                    self.parse_extent_tree_recursive(block_data, current_depth + 1)?;
                 extents.extend(sub_extents);
             }
         }
@@ -374,7 +470,7 @@ impl<'a> Ext4Fs<'a> {
     }
 
     fn read_block_map_data(&self, inode: &Inode) -> Result<Vec<u8>> {
-        let target_size = inode.size as usize;
+        let target_size = (inode.size).min(self.reader.len()) as usize;
         let bs = self.superblock.block_size() as usize;
         let mut result = Vec::with_capacity(target_size.min(bs * 12));
 

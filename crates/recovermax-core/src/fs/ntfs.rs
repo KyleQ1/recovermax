@@ -111,6 +111,7 @@ pub fn detect(reader: &ImageReader, offset: u64) -> Option<FsInfo> {
         block_size: bs.cluster_size(),
         total_size: bs.total_size(),
         offset,
+        lvm_map: None,
     })
 }
 

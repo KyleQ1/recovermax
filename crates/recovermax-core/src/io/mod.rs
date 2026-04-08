@@ -4,6 +4,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 
+/// Trait for reading data from a disk image or virtual device.
+/// All read methods return slices borrowing from the underlying storage.
+pub trait DiskRead {
+    fn read_at(&self, offset: u64, len: usize) -> Result<&[u8]>;
+    fn read_at_exact(&self, offset: u64, len: usize) -> Result<&[u8]>;
+    fn len(&self) -> u64;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Memory-mapped reader for disk images and block devices.
 /// Provides zero-copy access to arbitrarily large images.
 pub struct ImageReader {
@@ -48,6 +59,20 @@ impl ImageReader {
         Ok(&self.mmap[start..end])
     }
 
+    /// Read exactly `len` bytes at offset. Returns an error if fewer bytes are available.
+    pub fn read_at_exact(&self, offset: u64, len: usize) -> Result<&[u8]> {
+        let data = self.read_at(offset, len)?;
+        if data.len() < len {
+            anyhow::bail!(
+                "Short read at offset {}: wanted {} bytes, got {}",
+                offset,
+                len,
+                data.len()
+            );
+        }
+        Ok(data)
+    }
+
     /// Get a slice of the entire image
     pub fn as_bytes(&self) -> &[u8] {
         &self.mmap
@@ -82,5 +107,19 @@ impl ImageReader {
     /// Read a little-endian u64
     pub fn read_u64_le(&self, offset: u64) -> Result<u64> {
         Ok(u64::from_le_bytes(self.read_array::<8>(offset)?))
+    }
+}
+
+impl DiskRead for ImageReader {
+    fn read_at(&self, offset: u64, len: usize) -> Result<&[u8]> {
+        self.read_at(offset, len)
+    }
+
+    fn read_at_exact(&self, offset: u64, len: usize) -> Result<&[u8]> {
+        self.read_at_exact(offset, len)
+    }
+
+    fn len(&self) -> u64 {
+        self.len()
     }
 }

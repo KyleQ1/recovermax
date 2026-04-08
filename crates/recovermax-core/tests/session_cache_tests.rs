@@ -24,6 +24,7 @@ fn synthetic_session_artifact(image_path: &std::path::Path) -> RecoverySessionAr
         block_size: 4096,
         total_size: 4096,
         offset: 0,
+                    lvm_map: None,
     };
 
     let report = ScanReport {

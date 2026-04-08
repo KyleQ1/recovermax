@@ -720,7 +720,10 @@ fn run_info(image: &Path) -> Result<()> {
 fn run_scan(image: &Path, output: Option<PathBuf>, deep_scan: bool) -> Result<()> {
     let reader = ImageReader::open(image)?;
     let scanner = Scanner::new(&reader);
-    let options = ScanOptions { deep_scan };
+    let options = ScanOptions {
+        deep_scan,
+        ..Default::default()
+    };
     let report = scanner.full_scan_with_options(&options)?;
 
     println!("{}", report.summary());
@@ -2613,6 +2616,7 @@ mod tests {
                     block_size: 4096,
                     total_size: reader.len(),
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -2624,6 +2628,7 @@ mod tests {
                     block_size: 4096,
                     total_size: reader.len(),
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: None,
                 warnings: Vec::new(),
@@ -3004,6 +3009,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3015,6 +3021,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3111,6 +3118,7 @@ mod tests {
                     block_size: 4096,
                     total_size: image_size,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3122,6 +3130,7 @@ mod tests {
                     block_size: 4096,
                     total_size: image_size,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3231,6 +3240,7 @@ mod tests {
                     block_size: 4096,
                     total_size: reader.len(),
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3242,6 +3252,7 @@ mod tests {
                     block_size: 4096,
                     total_size: reader.len(),
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3348,6 +3359,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3359,6 +3371,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3460,6 +3473,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3471,6 +3485,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3564,6 +3579,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3575,6 +3591,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3713,6 +3730,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -3721,6 +3739,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                 ],
             },
@@ -3734,6 +3753,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     root_node_id: Some(1),
                     warnings: Vec::new(),
@@ -3777,6 +3797,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                     root_node_id: Some(3),
                     warnings: Vec::new(),
@@ -3838,6 +3859,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -3846,6 +3868,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                 ],
             },
@@ -3859,6 +3882,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     root_node_id: Some(1),
                     warnings: Vec::new(),
@@ -3902,6 +3926,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                     root_node_id: Some(3),
                     warnings: Vec::new(),
@@ -3958,6 +3983,7 @@ mod tests {
                     block_size: 1024,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 FsInfo {
                     fs_type: "ext4".to_string(),
@@ -3966,6 +3992,7 @@ mod tests {
                     block_size: 1024,
                     total_size: 4096,
                     offset: 4096,
+                    lvm_map: None,
                 },
             ],
         };
@@ -3990,6 +4017,7 @@ mod tests {
                     block_size: 1024,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 FsInfo {
                     fs_type: "ext4".to_string(),
@@ -3998,6 +4026,7 @@ mod tests {
                     block_size: 1024,
                     total_size: 4096,
                     offset: 4096,
+                    lvm_map: None,
                 },
             ],
         };
@@ -4026,6 +4055,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -4034,6 +4064,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                 ],
             },
@@ -4047,6 +4078,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 0,
+                    lvm_map: None,
                     },
                     root_node_id: Some(1),
                     warnings: vec![
@@ -4064,6 +4096,7 @@ mod tests {
                         block_size: 4096,
                         total_size: 4096,
                         offset: 4096,
+                    lvm_map: None,
                     },
                     root_node_id: Some(2),
                     warnings: vec![
@@ -4369,6 +4402,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -4380,6 +4414,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -4664,6 +4699,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -4675,6 +4711,7 @@ mod tests {
                     block_size: 4096,
                     total_size: 4096,
                     offset: 0,
+                    lvm_map: None,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),

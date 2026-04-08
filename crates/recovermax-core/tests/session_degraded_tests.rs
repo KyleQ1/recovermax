@@ -40,6 +40,7 @@ fn report_only_artifact(image_path: &std::path::Path) -> RecoverySessionArtifact
                 block_size: 4096,
                 total_size: 4096,
                 offset: 0,
+                    lvm_map: None,
             }],
         },
         filesystems: vec![FilesystemSessionArtifact {
@@ -51,6 +52,7 @@ fn report_only_artifact(image_path: &std::path::Path) -> RecoverySessionArtifact
                 block_size: 4096,
                 total_size: 4096,
                 offset: 0,
+                    lvm_map: None,
             },
             root_node_id: None,
             warnings: Vec::new(),

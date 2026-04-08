@@ -1,4 +1,5 @@
 pub mod ext4;
+pub mod lvm;
 pub mod ntfs;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,29 @@ pub struct FsInfo {
     pub block_size: u32,
     pub total_size: u64,
     pub offset: u64,
+    /// LVM segment map for multi-segment LVs. When present, the filesystem
+    /// lives inside an LV and `offset` is the disk offset of PE 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lvm_map: Option<LvmMap>,
+}
+
+/// LVM segment map describing how an LV maps to physical disk offsets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LvmMap {
+    /// Absolute disk byte offset of PE 0.
+    pub pe_start_bytes: u64,
+    /// Extent size in bytes.
+    pub extent_size_bytes: u64,
+    /// Segments mapping LV extents to PV extents.
+    pub segments: Vec<LvmSegment>,
+}
+
+/// A single LVM segment mapping logical extents to physical extents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LvmSegment {
+    pub start_le: u64,
+    pub extent_count: u64,
+    pub pv_start_pe: u64,
 }
 
 /// A recovered directory entry
