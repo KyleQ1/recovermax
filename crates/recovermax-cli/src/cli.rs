@@ -1031,23 +1031,31 @@ fn run_scan(
     let scanner = Scanner::new(&reader);
     let report = scanner.full_scan_with_options(&options)?;
 
-    // Print summary (scan found filesystems)
-    println!("\n{}", report.summary());
-
     if let Some(path) = output {
-        // Keep progress bars alive for tree building phase
+        // Transition display to tree building phase — same bars, no gap
+        {
+            let mut state = display.lock().unwrap();
+            state.current_phase = ScanPhase::TreeBuilding;
+            state.bytes_scanned = 0;
+            state.phase_start_time = Instant::now();
+        }
+
         let display_clone2 = Arc::clone(&display);
+        let block_bar2 = block_bar.clone();
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
+
+        // Switch progress bar to spinner style for tree building
+        progress_bar.set_style(
+            ProgressStyle::with_template(" {spinner:.green} {msg}").unwrap(),
+        );
 
         let tree_callback = move |event: ScanEvent| {
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            progress_bar2.set_style(
-                ProgressStyle::with_template(" {spinner:.green} {msg}")
-                    .unwrap(),
-            );
+            block_bar2.set_message(state.render_block_map());
+
             progress_bar2.set_message(format!(
                 "Building file tree: {} entries found{}",
                 state.bytes_scanned,
@@ -1059,7 +1067,6 @@ fn run_scan(
                 "Filesystems: {}",
                 state.fs_summary(),
             ));
-            stats_bar2.tick();
         };
 
         let artifact = RecoverySessionArtifact::from_scan_with_callback(
@@ -1069,14 +1076,23 @@ fn run_scan(
             Some(&tree_callback),
         )?;
 
+        // NOW clear everything and print final summary
+        block_bar.finish_and_clear();
+        progress_bar.finish_and_clear();
+        stats_bar.finish_and_clear();
+
+        println!("{}", report.summary());
+
         artifact.save_to_path(&path)?;
         println!("Session saved to {}", path.display());
-    }
+    } else {
+        // No output file — just print summary
+        block_bar.finish_and_clear();
+        progress_bar.finish_and_clear();
+        stats_bar.finish_and_clear();
 
-    // Clear progress display at the very end
-    block_bar.finish_and_clear();
-    progress_bar.finish_and_clear();
-    stats_bar.finish_and_clear();
+        println!("{}", report.summary());
+    }
 
     Ok(())
 }
