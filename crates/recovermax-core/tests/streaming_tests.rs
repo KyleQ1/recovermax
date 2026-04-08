@@ -579,3 +579,53 @@ fn stream_depth1_extent_tree() {
     assert_eq!(streamed.len(), 4096);
     assert!(streamed.iter().all(|&b| b == 0xDD));
 }
+
+#[test]
+fn bounded_read_extent_returns_at_most_max_bytes() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("bound-ext");
+    builder.write_block_group_descriptor(0, 3);
+
+    let content = b"Hello, this is more than 8 bytes of extent-based content for bounded read test.";
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, content.len() as u64, 20, 1);
+    builder.write_data(20, content);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+    let inode = fs.read_inode(11).unwrap();
+
+    let bounded = fs.read_inode_data_bounded(&inode, 8).unwrap();
+    assert_eq!(bounded.len(), 8);
+    assert_eq!(&bounded, &content[..8]);
+
+    let bounded_512 = fs.read_inode_data_bounded(&inode, 512).unwrap();
+    assert_eq!(bounded_512.len(), content.len());
+    assert_eq!(&bounded_512, content.as_slice());
+}
+
+#[test]
+fn bounded_read_blockmap_returns_at_most_max_bytes() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("bound-blk");
+    builder.write_block_group_descriptor(0, 3);
+
+    let content = b"Block map bounded read test data with more than 8 bytes of real content here.";
+    builder.write_inode_with_blockmap(11, 0x8000 | 0o644, content.len() as u64, &[20]);
+    builder.write_data(20, content);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+    let inode = fs.read_inode(11).unwrap();
+
+    let bounded = fs.read_inode_data_bounded(&inode, 8).unwrap();
+    assert_eq!(bounded.len(), 8);
+    assert_eq!(&bounded, &content[..8]);
+
+    let bounded_large = fs.read_inode_data_bounded(&inode, 1000).unwrap();
+    assert_eq!(bounded_large.len(), content.len());
+    assert_eq!(&bounded_large, content.as_slice());
+}

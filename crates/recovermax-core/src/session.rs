@@ -867,6 +867,7 @@ fn build_filesystem_sessions(
         }
 
         if !nodes.is_empty() {
+            let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
             append_ext4_deleted_orphans(
                 &ext4,
                 filesystem_index,
@@ -874,6 +875,7 @@ fn build_filesystem_sessions(
                 &mut next_node_id,
                 &mut nodes,
                 &mut warnings,
+                &journal_hints,
             );
         }
 
@@ -998,6 +1000,7 @@ fn append_ext4_deleted_orphans(
     next_node_id: &mut u64,
     nodes: &mut Vec<SessionNode>,
     warnings: &mut Vec<String>,
+    journal_hints: &std::collections::HashMap<u64, String>,
 ) {
     let deleted_inodes = match ext4.scan_deleted_inodes() {
         Ok(deleted) => deleted,
@@ -1047,7 +1050,10 @@ fn append_ext4_deleted_orphans(
 
         let node_id = *next_node_id;
         *next_node_id += 1;
-        let orphan_basename = format!("OrphanFile-{}", orphan.inode_num);
+        let orphan_basename = journal_hints
+            .get(&orphan.inode_num)
+            .cloned()
+            .unwrap_or_else(|| format!("OrphanFile-{}", orphan.inode_num));
         let orphan_path = format!("/$OrphanFiles/{}", orphan_basename);
         nodes.push(SessionNode {
             id: node_id,

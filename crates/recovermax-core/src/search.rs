@@ -296,6 +296,13 @@ fn path_matches_inner(
     query_is_path: bool,
     exact: bool,
 ) -> bool {
+    if is_glob_query(query) {
+        if query_is_path {
+            return glob_matches(query, absolute_path);
+        }
+        return glob_matches(query, basename) || glob_matches(query, absolute_path);
+    }
+
     if exact {
         if query_is_path {
             return absolute_path == query;
@@ -309,6 +316,42 @@ fn path_matches_inner(
     }
 
     basename.contains(query) || absolute_path.contains(query)
+}
+
+fn is_glob_query(query: &str) -> bool {
+    query.contains('*') || query.contains('?')
+}
+
+/// Simple glob matching with `*` (any sequence) and `?` (any single char).
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (pn, tn) = (p.len(), t.len());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0);
+
+    while ti < tn {
+        if pi < pn && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pn && p[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pn && p[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == pn
 }
 
 #[cfg(test)]
@@ -364,5 +407,75 @@ mod tests {
             ..Default::default()
         };
         assert!(path_matches("MING", "ming", "/data/ming", &opts));
+    }
+
+    #[test]
+    fn glob_star_extension() {
+        let opts = SearchOptions::default();
+        assert!(path_matches("*.txt", "notes.txt", "/home/notes.txt", &opts));
+        assert!(!path_matches("*.pdf", "notes.txt", "/home/notes.txt", &opts));
+    }
+
+    #[test]
+    fn glob_question_mark() {
+        let opts = SearchOptions::default();
+        assert!(path_matches("file?.txt", "file1.txt", "/data/file1.txt", &opts));
+        assert!(!path_matches("file?.txt", "file12.txt", "/data/file12.txt", &opts));
+    }
+
+    #[test]
+    fn glob_complex_pattern() {
+        let opts = SearchOptions::default();
+        assert!(path_matches(
+            "IMG_*.jpg",
+            "IMG_2024.jpg",
+            "/photos/IMG_2024.jpg",
+            &opts
+        ));
+        assert!(!path_matches(
+            "IMG_*.jpg",
+            "screenshot.jpg",
+            "/photos/screenshot.jpg",
+            &opts
+        ));
+    }
+
+    #[test]
+    fn glob_path_pattern() {
+        let opts = SearchOptions::default();
+        assert!(path_matches(
+            "/home/*/docs/*.pdf",
+            "report.pdf",
+            "/home/kyle/docs/report.pdf",
+            &opts
+        ));
+        assert!(!path_matches(
+            "/home/*/docs/*.pdf",
+            "report.pdf",
+            "/home/kyle/photos/report.pdf",
+            &opts
+        ));
+    }
+
+    #[test]
+    fn glob_case_insensitive() {
+        let opts = SearchOptions {
+            ignore_case: true,
+            ..Default::default()
+        };
+        assert!(path_matches("*.TXT", "notes.txt", "/data/notes.txt", &opts));
+    }
+
+    #[test]
+    fn glob_star_only_matches_everything() {
+        let opts = SearchOptions::default();
+        assert!(path_matches("*", "anything.txt", "/any/path/anything.txt", &opts));
+    }
+
+    #[test]
+    fn non_glob_query_still_works_as_substring() {
+        let opts = SearchOptions::default();
+        assert!(path_matches("notes", "my-notes.txt", "/home/my-notes.txt", &opts));
+        assert!(!path_matches("missing", "my-notes.txt", "/home/my-notes.txt", &opts));
     }
 }

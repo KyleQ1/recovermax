@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 
 use recovermax_core::carve;
+use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
 use recovermax_core::fs::ext4::{DeletedInode, Ext4Fs};
 use recovermax_core::fs::{EntrySource, FileType};
 use recovermax_core::io::ImageReader;
@@ -174,6 +175,30 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Path to write JSON audit log (enables forensic mode)
+        #[arg(long)]
+        audit_log: Option<PathBuf>,
+
+        /// Examiner name for chain of custody
+        #[arg(long)]
+        examiner: Option<String>,
+
+        /// Case number for chain of custody
+        #[arg(long)]
+        case_number: Option<String>,
+
+        /// Evidence ID for chain of custody
+        #[arg(long)]
+        evidence_id: Option<String>,
+
+        /// SHA-256 hash source image before and after recovery
+        #[arg(long)]
+        hash_image: bool,
+
+        /// Generate HTML forensic report after recovery
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
 
     /// Search browsable session paths
@@ -253,6 +278,16 @@ pub enum Command {
         /// Number of bytes to dump
         #[arg(short, long, default_value = "512")]
         length: usize,
+    },
+
+    /// Compute or verify SHA-256 hash of a disk image
+    Hash {
+        /// Path to disk image or block device
+        image: PathBuf,
+
+        /// Expected SHA-256 hash to verify against
+        #[arg(long)]
+        verify: Option<String>,
     },
 
     /// Scan for deleted files (inodes with dtime set or links_count=0)
@@ -384,7 +419,50 @@ pub fn run(args: Args) -> Result<()> {
             path,
             fs,
             memory_budget,
+            audit_log,
+            examiner,
+            case_number,
+            evidence_id,
+            hash_image,
+            report,
         } => {
+            let forensic_mode = audit_log.is_some() || report.is_some() || hash_image;
+
+            let mut audit = if forensic_mode {
+                let case_info = CaseInfo {
+                    examiner: examiner.unwrap_or_else(|| "Unknown".into()),
+                    case_number: case_number.unwrap_or_else(|| "N/A".into()),
+                    evidence_id: evidence_id.unwrap_or_else(|| "N/A".into()),
+                    description: format!("Recovery from {}", image.display()),
+                };
+                Some(AuditLog::new(case_info))
+            } else {
+                None
+            };
+
+            let image_hash = if hash_image {
+                println!("Hashing source image (SHA-256)...");
+                let hash = ImageHasher::hash_file(&image)?;
+                println!("Pre-recovery hash: {}", hash);
+                if let Some(ref mut log) = audit {
+                    log.log(AuditAction::ImageOpened {
+                        path: image.display().to_string(),
+                        size: std::fs::metadata(&image)?.len(),
+                        sha256: Some(hash.clone()),
+                    });
+                }
+                Some(hash)
+            } else {
+                if let Some(ref mut log) = audit {
+                    log.log(AuditAction::ImageOpened {
+                        path: image.display().to_string(),
+                        size: std::fs::metadata(&image)?.len(),
+                        sha256: None,
+                    });
+                }
+                None
+            };
+
             let mut session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -402,6 +480,44 @@ pub fn run(args: Args) -> Result<()> {
                 recovery_target.as_ref(),
                 requested_path.as_deref(),
             )?;
+
+            if hash_image {
+                println!("Verifying source image integrity...");
+                let post_hash = ImageHasher::hash_file(&image)?;
+                let matched = image_hash.as_ref().map_or(false, |h| h == &post_hash);
+                println!(
+                    "Post-recovery hash: {} ({})",
+                    post_hash,
+                    if matched { "MATCH" } else { "MISMATCH" }
+                );
+                if let Some(ref mut log) = audit {
+                    log.log(AuditAction::ImageVerified {
+                        sha256: post_hash,
+                        matched,
+                    });
+                }
+            }
+
+            if let Some(ref log) = audit {
+                if let Some(ref audit_path) = audit_log {
+                    log.save(audit_path)?;
+                    println!("Audit log saved to {}", audit_path.display());
+                }
+            }
+
+            if let Some(ref report_path) = report {
+                if let Some(ref log) = audit {
+                    ForensicReport::generate(
+                        log,
+                        &image.display().to_string(),
+                        image_hash.as_deref(),
+                        &[],
+                        report_path,
+                    )?;
+                    println!("Forensic report saved to {}", report_path.display());
+                }
+            }
+
             Ok(())
         }
         Command::Search {
@@ -474,6 +590,23 @@ pub fn run(args: Args) -> Result<()> {
             };
             let data = reader.read_at(off, length)?;
             print_hexdump_pub(data, off);
+            Ok(())
+        }
+        Command::Hash { image, verify } => {
+            if let Some(expected) = verify {
+                println!("Verifying SHA-256 of {} ...", image.display());
+                let actual = ImageHasher::hash_file(&image)?;
+                if actual == expected.to_lowercase() {
+                    println!("MATCH: {}", actual);
+                } else {
+                    println!("MISMATCH: expected {}, got {}", expected, actual);
+                    std::process::exit(1);
+                }
+            } else {
+                println!("Computing SHA-256 of {} ...", image.display());
+                let hash = ImageHasher::hash_file(&image)?;
+                println!("{}", hash);
+            }
             Ok(())
         }
         Command::Deleted {
@@ -845,7 +978,20 @@ fn unique_orphan_recovery_candidate(
         return candidates.pop();
     }
 
-    strongly_matched_orphan_recovery_candidate(session, node, &candidates)
+    // Stage 1: content-type sniffing (strongest signal — exact match)
+    if let Some(winner) = strongly_matched_orphan_recovery_candidate(session, node, &candidates) {
+        return Some(winner);
+    }
+
+    // Stage 2: tiebreaker scoring among content-type-narrowed pool (or full pool)
+    let narrowed = content_type_narrowed_candidates(session, node, &candidates);
+    let pool = if narrowed.len() > 1 {
+        &narrowed
+    } else {
+        &candidates
+    };
+
+    tiebreaker_scored_orphan_candidate(session, node, pool)
 }
 
 fn orphan_recovery_candidates(
@@ -944,7 +1090,7 @@ fn sniff_candidate_content_kind(
 ) -> Option<CandidateContentKind> {
     let inode_num = candidate.inode?;
     let inode = ext4.read_inode(inode_num).ok()?;
-    let data = ext4.read_inode_data(&inode).ok()?;
+    let data = ext4.read_inode_data_bounded(&inode, 512).ok()?;
     Some(sniff_content_kind(&data))
 }
 
@@ -1040,6 +1186,391 @@ fn format_orphan_candidate(candidate: &SessionNode) -> String {
 
 fn is_orphan_candidate(node: &SessionNode) -> bool {
     node.source == EntrySource::SyntheticOrphan || node.path.starts_with("/$OrphanFiles/")
+}
+
+// ---------------------------------------------------------------------------
+// Tiebreaker scoring for ambiguous orphan candidate resolution
+// ---------------------------------------------------------------------------
+
+/// Contextual signals gathered from resolved siblings of a residual deleted entry.
+struct SiblingContext {
+    /// Median deleted_unix timestamp among resolved siblings.
+    median_dtime: Option<i64>,
+    /// (min, max) inode range of resolved siblings.
+    inode_range: Option<(u64, u64)>,
+}
+
+fn gather_sibling_context(
+    session: &RecoverySession,
+    node: &SessionNode,
+) -> SiblingContext {
+    if filesystem_has_tree(session, node.filesystem_index) {
+        return gather_sibling_context_from_session(session, node);
+    }
+    if let Ok(ext4) = live_ext4(session, node.filesystem_index) {
+        return gather_sibling_context_live(&ext4, node.parent_inode);
+    }
+    SiblingContext {
+        median_dtime: None,
+        inode_range: None,
+    }
+}
+
+fn gather_sibling_context_from_session(
+    session: &RecoverySession,
+    node: &SessionNode,
+) -> SiblingContext {
+    let parent_id = match node.parent_id {
+        Some(pid) => pid,
+        None => {
+            return SiblingContext {
+                median_dtime: None,
+                inode_range: None,
+            }
+        }
+    };
+
+    let filesystem = match session
+        .artifact()
+        .filesystem_session(node.filesystem_index)
+    {
+        Some(fs) => fs,
+        None => {
+            return SiblingContext {
+                median_dtime: None,
+                inode_range: None,
+            }
+        }
+    };
+
+    let mut dtimes = Vec::new();
+    let mut inodes = Vec::new();
+
+    for sibling in &filesystem.nodes {
+        if sibling.id == node.id || sibling.parent_id != Some(parent_id) {
+            continue;
+        }
+        if let Some(inode) = sibling.inode {
+            inodes.push(inode);
+        }
+        if let Some(dtime) = sibling
+            .timestamps
+            .as_ref()
+            .and_then(|ts| ts.deleted_unix)
+        {
+            dtimes.push(dtime);
+        }
+    }
+
+    dtimes.sort_unstable();
+    inodes.sort_unstable();
+
+    SiblingContext {
+        median_dtime: if dtimes.is_empty() {
+            None
+        } else {
+            Some(median_i64(&dtimes))
+        },
+        inode_range: if inodes.is_empty() {
+            None
+        } else {
+            Some((*inodes.first().unwrap(), *inodes.last().unwrap()))
+        },
+    }
+}
+
+fn gather_sibling_context_live(
+    ext4: &Ext4Fs<'_>,
+    parent_inode: Option<u64>,
+) -> SiblingContext {
+    let parent_ino = match parent_inode {
+        Some(ino) => ino,
+        None => {
+            return SiblingContext {
+                median_dtime: None,
+                inode_range: None,
+            }
+        }
+    };
+
+    let entries = match ext4.list_directory(parent_ino) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return SiblingContext {
+                median_dtime: None,
+                inode_range: None,
+            }
+        }
+    };
+
+    let mut dtimes = Vec::new();
+    let mut inodes = Vec::new();
+    let mut count = 0usize;
+    const MAX_SIBLINGS: usize = 100;
+
+    for entry in &entries {
+        if entry.name == "." || entry.name == ".." || entry.inode == 0 {
+            continue;
+        }
+        count += 1;
+        if count > MAX_SIBLINGS {
+            break;
+        }
+        inodes.push(entry.inode);
+        if let Ok(inode) = ext4.read_inode(entry.inode) {
+            if inode.dtime != 0 {
+                dtimes.push(inode.dtime as i64);
+            }
+        }
+    }
+
+    dtimes.sort_unstable();
+    inodes.sort_unstable();
+
+    SiblingContext {
+        median_dtime: if dtimes.is_empty() {
+            None
+        } else {
+            Some(median_i64(&dtimes))
+        },
+        inode_range: if inodes.is_empty() {
+            None
+        } else {
+            Some((*inodes.first().unwrap(), *inodes.last().unwrap()))
+        },
+    }
+}
+
+fn median_i64(sorted: &[i64]) -> i64 {
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+    }
+}
+
+// --- Individual scoring functions (each returns 0.0–1.0) ---
+
+const DTIME_EXACT_THRESHOLD_SECS: f64 = 2.0;
+const DTIME_MAX_DISTANCE_SECS: f64 = 3600.0;
+
+fn score_dtime_proximity(candidate: &SessionNode, sibling_median_dtime: i64) -> f64 {
+    let candidate_dtime = match candidate
+        .timestamps
+        .as_ref()
+        .and_then(|ts| ts.deleted_unix)
+    {
+        Some(dt) => dt,
+        None => return 0.0,
+    };
+    let distance = (candidate_dtime - sibling_median_dtime).unsigned_abs() as f64;
+    if distance <= DTIME_EXACT_THRESHOLD_SECS {
+        return 1.0;
+    }
+    if distance >= DTIME_MAX_DISTANCE_SECS {
+        return 0.0;
+    }
+    1.0 - (distance - DTIME_EXACT_THRESHOLD_SECS)
+        / (DTIME_MAX_DISTANCE_SECS - DTIME_EXACT_THRESHOLD_SECS)
+}
+
+fn score_block_group_locality(
+    candidate_inode: u64,
+    parent_inode: u64,
+    inodes_per_group: u32,
+) -> f64 {
+    let ipg = inodes_per_group as u64;
+    if ipg == 0 {
+        return 0.0;
+    }
+    let candidate_group = (candidate_inode.saturating_sub(1)) / ipg;
+    let parent_group = (parent_inode.saturating_sub(1)) / ipg;
+    if candidate_group == parent_group {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn score_inode_range_proximity(
+    candidate_inode: u64,
+    inode_range: (u64, u64),
+) -> f64 {
+    let (min_ino, max_ino) = inode_range;
+    if candidate_inode >= min_ino && candidate_inode <= max_ino {
+        return 1.0;
+    }
+    let distance = if candidate_inode < min_ino {
+        min_ino - candidate_inode
+    } else {
+        candidate_inode - max_ino
+    };
+    let span = max_ino.saturating_sub(min_ino).max(1) as f64;
+    let normalized = distance as f64 / span;
+    (1.0 - normalized).max(0.0)
+}
+
+fn score_size_reasonableness(candidate: &SessionNode, extension: Option<&str>) -> f64 {
+    let size = match candidate.size {
+        Some(s) => s,
+        None => return 0.5,
+    };
+    let ext = match extension {
+        Some(e) => e,
+        None => return 0.5,
+    };
+    match ext {
+        "txt" | "md" | "csv" | "log" | "json" | "xml" | "html" | "htm" | "rs" | "c" | "cpp"
+        | "h" | "toml" | "yaml" | "yml" | "py" | "js" | "ts" | "sh" | "conf" | "cfg" => {
+            if size <= 10_000_000 {
+                1.0
+            } else if size <= 100_000_000 {
+                0.7
+            } else if size <= 1_000_000_000 {
+                0.3
+            } else {
+                0.0
+            }
+        }
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" => {
+            if size <= 50_000_000 {
+                1.0
+            } else if size <= 500_000_000 {
+                0.5
+            } else {
+                0.0
+            }
+        }
+        "pdf" => {
+            if size <= 100_000_000 {
+                1.0
+            } else if size <= 1_000_000_000 {
+                0.5
+            } else {
+                0.0
+            }
+        }
+        "zip" | "tar" | "gz" | "xz" | "bz2" | "7z" | "rar" => 0.5,
+        _ => 0.5,
+    }
+}
+
+// --- Content-type narrowing (subset that matched extension) ---
+
+fn content_type_narrowed_candidates(
+    session: &RecoverySession,
+    node: &SessionNode,
+    candidates: &[SessionNode],
+) -> Vec<SessionNode> {
+    let expected_kind = match expected_content_kind_for_path(&node.path) {
+        Some(kind) => kind,
+        None => return Vec::new(),
+    };
+    let reader = match session.attached_reader() {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    let filesystem = match session
+        .artifact()
+        .filesystem_session(node.filesystem_index)
+    {
+        Some(fs) => fs,
+        None => return Vec::new(),
+    };
+    if filesystem.fs_info.fs_type != "ext4" {
+        return Vec::new();
+    }
+    let ext4 = match Ext4Fs::new(reader, filesystem.fs_info.offset) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut matching = Vec::new();
+    for candidate in candidates {
+        let actual_kind = match sniff_candidate_content_kind(&ext4, candidate) {
+            Some(kind) => kind,
+            None => return Vec::new(),
+        };
+        if actual_kind == CandidateContentKind::Unknown {
+            return Vec::new();
+        }
+        if actual_kind == expected_kind {
+            matching.push(candidate.clone());
+        }
+    }
+    matching
+}
+
+// --- Composite tiebreaker scoring ---
+
+const WEIGHT_DTIME: f64 = 3.0;
+const WEIGHT_BLOCK_GROUP: f64 = 2.0;
+const WEIGHT_INODE_RANGE: f64 = 2.0;
+const WEIGHT_SIZE: f64 = 1.0;
+const MIN_SCORE_GAP: f64 = 2.0;
+
+fn tiebreaker_scored_orphan_candidate(
+    session: &RecoverySession,
+    node: &SessionNode,
+    candidates: &[SessionNode],
+) -> Option<SessionNode> {
+    if candidates.len() < 2 {
+        return candidates.first().cloned();
+    }
+
+    let siblings = gather_sibling_context(session, node);
+
+    let inodes_per_group = live_ext4(session, node.filesystem_index)
+        .ok()
+        .map(|ext4| ext4.superblock.inodes_per_group);
+
+    let extension = Path::new(&node.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    let mut scores: Vec<(f64, usize)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            let mut total = 0.0;
+
+            if let Some(median_dt) = siblings.median_dtime {
+                total += WEIGHT_DTIME * score_dtime_proximity(candidate, median_dt);
+            }
+
+            if let (Some(parent_ino), Some(ipg)) = (node.parent_inode, inodes_per_group) {
+                if let Some(candidate_ino) = candidate.inode {
+                    total +=
+                        WEIGHT_BLOCK_GROUP * score_block_group_locality(candidate_ino, parent_ino, ipg);
+                }
+            }
+
+            if let Some(range) = siblings.inode_range {
+                if let Some(candidate_ino) = candidate.inode {
+                    total +=
+                        WEIGHT_INODE_RANGE * score_inode_range_proximity(candidate_ino, range);
+                }
+            }
+
+            total += WEIGHT_SIZE
+                * score_size_reasonableness(candidate, extension.as_deref());
+
+            (total, idx)
+        })
+        .collect();
+
+    scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let best = scores[0].0;
+    let runner_up = scores[1].0;
+
+    if best - runner_up >= MIN_SCORE_GAP {
+        Some(candidates[scores[0].1].clone())
+    } else {
+        None
+    }
 }
 
 pub(crate) fn resolve_node_with_fallback(
@@ -3580,5 +4111,667 @@ mod tests {
 
         let err = traversal_warnings(&artifact, Some(7), None).unwrap_err();
         assert!(err.to_string().contains("filesystem 7 not found"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tiebreaker scoring unit tests
+    // -----------------------------------------------------------------------
+
+    fn make_orphan_candidate(
+        inode: u64,
+        size: u64,
+        deleted_unix: Option<i64>,
+    ) -> SessionNode {
+        SessionNode {
+            id: 0xF100_0000_0000_0000 | inode,
+            parent_id: None,
+            filesystem_index: 0,
+            inode: Some(inode),
+            basename: format!("OrphanFile-{}", inode),
+            path: format!("/$OrphanFiles/OrphanFile-{}", inode),
+            file_type: FileType::RegularFile,
+            deleted: true,
+            size: Some(size),
+            source: EntrySource::SyntheticOrphan,
+            parent_inode: None,
+            timestamps: Some(SessionNodeTimestamps {
+                created_unix: None,
+                modified_unix: None,
+                accessed_unix: None,
+                deleted_unix,
+            }),
+        }
+    }
+
+    #[test]
+    fn score_dtime_exact_match_returns_one() {
+        let candidate = make_orphan_candidate(10, 100, Some(1_700_000_100));
+        let score = score_dtime_proximity(&candidate, 1_700_000_100);
+        assert!((score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_dtime_within_threshold_returns_one() {
+        let candidate = make_orphan_candidate(10, 100, Some(1_700_000_101));
+        let score = score_dtime_proximity(&candidate, 1_700_000_100);
+        assert!((score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_dtime_at_1800s_returns_half() {
+        let candidate = make_orphan_candidate(10, 100, Some(1_700_001_900));
+        let score = score_dtime_proximity(&candidate, 1_700_000_100);
+        assert!((score - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn score_dtime_beyond_3600s_returns_zero() {
+        let candidate = make_orphan_candidate(10, 100, Some(1_700_100_000));
+        let score = score_dtime_proximity(&candidate, 1_700_000_100);
+        assert!((score - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_dtime_no_timestamp_returns_zero() {
+        let candidate = make_orphan_candidate(10, 100, None);
+        let score = score_dtime_proximity(&candidate, 1_700_000_100);
+        assert!((score - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_block_group_same_returns_one() {
+        // inode 50, parent inode 100, inodes_per_group 128
+        // group(50) = (50-1)/128 = 0, group(100) = (100-1)/128 = 0
+        let score = score_block_group_locality(50, 100, 128);
+        assert!((score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_block_group_different_returns_zero() {
+        // inode 200, parent inode 100, inodes_per_group 128
+        // group(200) = (200-1)/128 = 1, group(100) = (100-1)/128 = 0
+        let score = score_block_group_locality(200, 100, 128);
+        assert!((score - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_inode_inside_range_returns_one() {
+        let score = score_inode_range_proximity(95, (80, 100));
+        assert!((score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_inode_outside_range_decays() {
+        // range is 80..100 (span=20), inode 120 is distance 20 from max
+        // normalized = 20/20 = 1.0, score = max(1.0 - 1.0, 0.0) = 0.0
+        let score = score_inode_range_proximity(120, (80, 100));
+        assert!((score - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_inode_slightly_outside_range() {
+        // range is 80..100 (span=20), inode 110 is distance 10 from max
+        // normalized = 10/20 = 0.5, score = 0.5
+        let score = score_inode_range_proximity(110, (80, 100));
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_size_text_small_returns_one() {
+        let candidate = make_orphan_candidate(10, 500, None);
+        let score = score_size_reasonableness(&candidate, Some("rs"));
+        assert!((score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_size_text_huge_returns_zero() {
+        let candidate = make_orphan_candidate(10, 5_000_000_000, None);
+        let score = score_size_reasonableness(&candidate, Some("rs"));
+        assert!((score - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_size_unknown_extension_returns_neutral() {
+        let candidate = make_orphan_candidate(10, 500, None);
+        let score = score_size_reasonableness(&candidate, Some("xyz"));
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn score_size_no_extension_returns_neutral() {
+        let candidate = make_orphan_candidate(10, 500, None);
+        let score = score_size_reasonableness(&candidate, None);
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn median_i64_odd_length() {
+        assert_eq!(median_i64(&[1, 3, 5]), 3);
+    }
+
+    #[test]
+    fn median_i64_even_length() {
+        assert_eq!(median_i64(&[1, 3, 5, 7]), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tiebreaker integration tests (session-based fixtures)
+    // -----------------------------------------------------------------------
+
+    fn make_tiebreaker_artifact(
+        residual_path: &str,
+        parent_inode: Option<u64>,
+        siblings: Vec<SessionNode>,
+        orphans: Vec<SessionNode>,
+    ) -> RecoverySessionArtifact {
+        let residual_basename = Path::new(residual_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut nodes = vec![
+            // root
+            SessionNode {
+                id: 1,
+                parent_id: None,
+                filesystem_index: 0,
+                inode: Some(2),
+                basename: "/".to_string(),
+                path: "/".to_string(),
+                file_type: FileType::Directory,
+                deleted: false,
+                size: Some(4096),
+                source: EntrySource::Filesystem,
+                parent_inode: None,
+                timestamps: None,
+            },
+            // parent directory
+            SessionNode {
+                id: 10,
+                parent_id: Some(1),
+                filesystem_index: 0,
+                inode: parent_inode,
+                basename: "dir".to_string(),
+                path: "/dir".to_string(),
+                file_type: FileType::Directory,
+                deleted: false,
+                size: Some(4096),
+                source: EntrySource::Filesystem,
+                parent_inode: Some(2),
+                timestamps: None,
+            },
+            // residual deleted entry
+            SessionNode {
+                id: 20,
+                parent_id: Some(10),
+                filesystem_index: 0,
+                inode: None,
+                basename: residual_basename,
+                path: residual_path.to_string(),
+                file_type: FileType::RegularFile,
+                deleted: true,
+                size: None,
+                source: EntrySource::DeletedSlack,
+                parent_inode: parent_inode,
+                timestamps: None,
+            },
+            // $OrphanFiles dir
+            SessionNode {
+                id: 100,
+                parent_id: Some(1),
+                filesystem_index: 0,
+                inode: None,
+                basename: "$OrphanFiles".to_string(),
+                path: "/$OrphanFiles".to_string(),
+                file_type: FileType::Directory,
+                deleted: false,
+                size: None,
+                source: EntrySource::SyntheticOrphan,
+                parent_inode: None,
+                timestamps: None,
+            },
+        ];
+
+        // siblings go under parent dir (parent_id = 10)
+        for mut sib in siblings {
+            sib.parent_id = Some(10);
+            sib.filesystem_index = 0;
+            nodes.push(sib);
+        }
+
+        // orphans go under $OrphanFiles (parent_id = 100)
+        for mut orphan in orphans {
+            orphan.parent_id = Some(100);
+            orphan.filesystem_index = 0;
+            nodes.push(orphan);
+        }
+
+        RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 4096,
+            },
+            report: ScanReport {
+                image_size: 4096,
+                partitions: vec![Partition {
+                    name: "p1".to_string(),
+                    offset: 0,
+                    size: 4096,
+                    fs_type: "Linux".to_string(),
+                }],
+                filesystems: vec![FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: 4096,
+                    offset: 0,
+                }],
+            },
+            filesystems: vec![FilesystemSessionArtifact {
+                filesystem_index: 0,
+                fs_info: FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: 4096,
+                    offset: 0,
+                },
+                root_node_id: Some(1),
+                warnings: Vec::new(),
+                nodes,
+            }],
+        }
+    }
+
+    fn make_sibling(id: u64, name: &str, inode: u64, deleted_unix: Option<i64>) -> SessionNode {
+        SessionNode {
+            id,
+            parent_id: None, // set by make_tiebreaker_artifact
+            filesystem_index: 0,
+            inode: Some(inode),
+            basename: name.to_string(),
+            path: format!("/dir/{}", name),
+            file_type: FileType::RegularFile,
+            deleted: false,
+            size: Some(1024),
+            source: EntrySource::Filesystem,
+            parent_inode: None,
+            timestamps: Some(SessionNodeTimestamps {
+                created_unix: None,
+                modified_unix: None,
+                accessed_unix: None,
+                deleted_unix,
+            }),
+        }
+    }
+
+    #[test]
+    fn tiebreaker_dtime_resolves_among_same_type_candidates() {
+        // Two orphan candidates, both regular files. Siblings have dtimes ~1_700_000_100.
+        // Candidate A (inode 50) has dtime 1_700_000_101 (within cluster).
+        // Candidate B (inode 500) has dtime 1_600_000_000 (way off).
+        let siblings = vec![
+            make_sibling(30, "a.txt", 80, Some(1_700_000_098)),
+            make_sibling(31, "b.txt", 90, Some(1_700_000_100)),
+            make_sibling(32, "c.txt", 100, Some(1_700_000_102)),
+        ];
+        let orphans = vec![
+            make_orphan_candidate(50, 500, Some(1_700_000_101)),
+            make_orphan_candidate(500, 600, Some(1_600_000_000)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", Some(60), siblings, orphans);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
+        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        assert!(winner.is_some(), "tiebreaker should resolve");
+        assert_eq!(winner.unwrap().inode, Some(50));
+    }
+
+    #[test]
+    fn tiebreaker_block_group_resolves_when_parent_known() {
+        // No sibling context (no siblings with dtimes/inodes).
+        // Parent inode 100, inodes_per_group 128 → parent in block group 0.
+        // Candidate A (inode 50) in block group 0. Candidate B (inode 200) in block group 1.
+        // Block group alone (weight 2.0) + size (weight 1.0) should create gap.
+        // But without a reader to get inodes_per_group, block group scoring is unavailable
+        // from session-only fixtures. This test validates the scoring functions directly.
+        let candidate_a = make_orphan_candidate(50, 500, None);
+        let candidate_b = make_orphan_candidate(200, 600, None);
+
+        let score_a = score_block_group_locality(50, 100, 128);
+        let score_b = score_block_group_locality(200, 100, 128);
+        assert!((score_a - 1.0).abs() < 0.001);
+        assert!((score_b - 0.0).abs() < 0.001);
+
+        // Also verify size scoring gives both neutral scores (both small)
+        let size_a = score_size_reasonableness(&candidate_a, Some("txt"));
+        let size_b = score_size_reasonableness(&candidate_b, Some("txt"));
+        assert!((size_a - 1.0).abs() < 0.001);
+        assert!((size_b - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn tiebreaker_inode_range_resolves_among_candidates() {
+        // Siblings have inodes 80, 90, 100. Sibling dtime cluster at ~1_700_000_100.
+        // Candidate A (inode 95, dtime 1_700_000_101) is inside range + dtime cluster.
+        // Candidate B (inode 500, dtime 1_700_000_101) is far outside range, same dtime.
+        // inode_range should make the difference.
+        let siblings = vec![
+            make_sibling(30, "a.txt", 80, Some(1_700_000_100)),
+            make_sibling(31, "b.txt", 90, Some(1_700_000_100)),
+            make_sibling(32, "c.txt", 100, Some(1_700_000_100)),
+        ];
+        let orphans = vec![
+            make_orphan_candidate(95, 500, Some(1_700_000_101)),
+            make_orphan_candidate(500, 600, Some(1_700_000_101)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", Some(60), siblings, orphans);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
+        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        assert!(winner.is_some(), "tiebreaker should resolve");
+        assert_eq!(winner.unwrap().inode, Some(95));
+    }
+
+    #[test]
+    fn tiebreaker_stays_ambiguous_when_signals_conflict() {
+        // Candidate A: dtime matches cluster but inode far from siblings.
+        // Candidate B: inode in sibling range but dtime way off.
+        // Neither has a clear advantage → stays ambiguous.
+        let siblings = vec![
+            make_sibling(30, "a.txt", 80, Some(1_700_000_100)),
+            make_sibling(31, "b.txt", 90, Some(1_700_000_100)),
+            make_sibling(32, "c.txt", 100, Some(1_700_000_100)),
+        ];
+        let orphans = vec![
+            // A: good dtime (1s off), bad inode (far from 80-100)
+            make_orphan_candidate(500, 500, Some(1_700_000_101)),
+            // B: bad dtime (way off), good inode (inside 80-100)
+            make_orphan_candidate(95, 600, Some(1_600_000_000)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", Some(60), siblings, orphans);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
+        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        assert!(winner.is_none(), "should stay ambiguous when signals conflict");
+    }
+
+    #[test]
+    fn tiebreaker_stays_ambiguous_with_no_context() {
+        // No siblings, no parent inode. Two identical-looking candidates.
+        let orphans = vec![
+            make_orphan_candidate(42, 500, Some(1_700_000_100)),
+            make_orphan_candidate(99, 600, Some(1_700_000_200)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", None, vec![], orphans);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
+        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        assert!(winner.is_none(), "should stay ambiguous with no sibling context");
+    }
+
+    #[test]
+    fn tiebreaker_size_breaks_tie_when_other_signals_equal() {
+        // Both candidates have matching dtime and inode range,
+        // but candidate A is a reasonable .rs file (500B) and B is absurdly large (5GB).
+        // The size signal (weight 1.0) should push A over the gap threshold when
+        // combined with dtime (weight 3.0) difference.
+        let siblings = vec![
+            make_sibling(30, "a.rs", 80, Some(1_700_000_100)),
+            make_sibling(31, "b.rs", 90, Some(1_700_000_100)),
+        ];
+        // A: good dtime, inside inode range, reasonable size
+        // B: dtime 1800s off (~0.5 score), outside inode range, gigantic
+        let orphans = vec![
+            make_orphan_candidate(85, 500, Some(1_700_000_101)),
+            make_orphan_candidate(85000, 5_000_000_000, Some(1_700_001_900)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.rs", Some(60), siblings, orphans);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.rs")
+            .unwrap()
+            .clone();
+
+        let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
+        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        assert!(winner.is_some(), "size should help break tie");
+        assert_eq!(winner.unwrap().inode, Some(85));
+    }
+
+    #[test]
+    fn gather_sibling_context_extracts_dtimes_and_inodes() {
+        let siblings = vec![
+            make_sibling(30, "a.txt", 80, Some(1_700_000_098)),
+            make_sibling(31, "b.txt", 90, Some(1_700_000_100)),
+            make_sibling(32, "c.txt", 100, Some(1_700_000_102)),
+        ];
+
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", Some(60), siblings, vec![]);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let ctx = gather_sibling_context(&session, &residual);
+        assert_eq!(ctx.median_dtime, Some(1_700_000_100));
+        assert_eq!(ctx.inode_range, Some((80, 100)));
+    }
+
+    #[test]
+    fn gather_sibling_context_handles_no_siblings() {
+        let artifact = make_tiebreaker_artifact("/dir/ghost.txt", Some(60), vec![], vec![]);
+        let session = RecoverySession::from_artifact(artifact, None);
+        let residual = session
+            .artifact()
+            .filesystem_session(0)
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.path == "/dir/ghost.txt")
+            .unwrap()
+            .clone();
+
+        let ctx = gather_sibling_context(&session, &residual);
+        assert!(ctx.median_dtime.is_none());
+        assert!(ctx.inode_range.is_none());
+    }
+
+    #[test]
+    fn existing_multi_candidate_test_still_stays_ambiguous() {
+        // Same scenario as deleted_residual_path_reports_multiple_orphan_candidates:
+        // Two orphan candidates at root level (parent_id = root), no siblings with context.
+        // The tiebreaker should remain ambiguous because there's no sibling data.
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 4096,
+            },
+            report: ScanReport {
+                image_size: 4096,
+                partitions: vec![Partition {
+                    name: "p1".to_string(),
+                    offset: 0,
+                    size: 4096,
+                    fs_type: "Linux".to_string(),
+                }],
+                filesystems: vec![FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: 4096,
+                    offset: 0,
+                }],
+            },
+            filesystems: vec![FilesystemSessionArtifact {
+                filesystem_index: 0,
+                fs_info: FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: 4096,
+                    offset: 0,
+                },
+                root_node_id: Some(1),
+                warnings: Vec::new(),
+                nodes: vec![
+                    SessionNode {
+                        id: 1,
+                        parent_id: None,
+                        filesystem_index: 0,
+                        inode: Some(2),
+                        basename: "/".to_string(),
+                        path: "/".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: Some(4096),
+                        source: EntrySource::Filesystem,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 2,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "ghost.txt".to_string(),
+                        path: "/ghost.txt".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: None,
+                        source: EntrySource::DeletedSlack,
+                        parent_inode: Some(2),
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 3,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "$OrphanFiles".to_string(),
+                        path: "/$OrphanFiles".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: None,
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 4,
+                        parent_id: Some(3),
+                        filesystem_index: 0,
+                        inode: Some(42),
+                        basename: "OrphanFile-42".to_string(),
+                        path: "/$OrphanFiles/OrphanFile-42".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: Some(11),
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: Some(SessionNodeTimestamps {
+                            created_unix: Some(1_700_000_041),
+                            modified_unix: Some(1_700_000_042),
+                            accessed_unix: Some(1_700_000_043),
+                            deleted_unix: Some(1_700_000_044),
+                        }),
+                    },
+                    SessionNode {
+                        id: 5,
+                        parent_id: Some(3),
+                        filesystem_index: 0,
+                        inode: Some(99),
+                        basename: "OrphanFile-99".to_string(),
+                        path: "/$OrphanFiles/OrphanFile-99".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: Some(7),
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: Some(SessionNodeTimestamps {
+                            created_unix: Some(1_700_000_099),
+                            modified_unix: Some(1_700_000_100),
+                            accessed_unix: Some(1_700_000_101),
+                            deleted_unix: Some(1_700_000_102),
+                        }),
+                    },
+                ],
+            }],
+        };
+
+        let mut session = RecoverySession::from_artifact(artifact, None);
+        // The resolve should still fail (ambiguous) because no sibling context exists
+        let err = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Possible orphan candidates:")
+                || message.contains("residual deleted directory entry"),
+            "should still be ambiguous: {}",
+            message
+        );
     }
 }

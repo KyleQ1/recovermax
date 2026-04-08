@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 
 use anyhow::{Context, Result};
@@ -40,6 +41,8 @@ pub struct Ext4Superblock {
     pub volume_name: String,
     pub uuid: [u8; 16],
     pub feature_incompat: u32,
+    #[serde(default)]
+    pub journal_inum: u32,
 }
 
 impl Ext4Superblock {
@@ -97,6 +100,7 @@ pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<E
     let inodes_per_group = u32::from_le_bytes(data[0x28..0x2C].try_into()?);
     let inode_size = u16::from_le_bytes([data[0x58], data[0x59]]);
     let feature_incompat = u32::from_le_bytes(data[0x60..0x64].try_into()?);
+    let journal_inum = u32::from_le_bytes(data[0xE0..0xE4].try_into()?);
 
     // 64-bit block counts
     let blocks_count_hi = u32::from_le_bytes(data[0x150..0x154].try_into()?);
@@ -129,6 +133,7 @@ pub fn parse_superblock(reader: &ImageReader, partition_offset: u64) -> Result<E
         volume_name,
         uuid,
         feature_incompat,
+        journal_inum,
     })
 }
 
@@ -276,6 +281,16 @@ impl<'a> Ext4Fs<'a> {
         }
     }
 
+    /// Read at most `max_bytes` of an inode's data without loading the entire file.
+    pub fn read_inode_data_bounded(&self, inode: &Inode, max_bytes: usize) -> Result<Vec<u8>> {
+        let effective = (inode.size as usize).min(max_bytes);
+        if inode.uses_extents() {
+            self.read_extent_data_bounded(inode, effective)
+        } else {
+            self.read_block_map_data_bounded(inode, effective)
+        }
+    }
+
     fn read_extent_data(&self, inode: &Inode) -> Result<Vec<u8>> {
         let mut result = Vec::with_capacity(inode.size as usize);
         let extents = self.parse_extent_tree(&inode.block_data)?;
@@ -288,6 +303,24 @@ impl<'a> Ext4Fs<'a> {
         }
 
         result.truncate(inode.size as usize);
+        Ok(result)
+    }
+
+    fn read_extent_data_bounded(&self, inode: &Inode, max_bytes: usize) -> Result<Vec<u8>> {
+        let mut result = Vec::with_capacity(max_bytes);
+        let extents = self.parse_extent_tree(&inode.block_data)?;
+
+        for extent in &extents {
+            if result.len() >= max_bytes {
+                break;
+            }
+            let offset = self.block_offset(extent.start_block);
+            let len = extent.block_count as u64 * self.superblock.block_size() as u64;
+            let data = self.reader.read_at(offset, len as usize)?;
+            result.extend_from_slice(data);
+        }
+
+        result.truncate(max_bytes.min(inode.size as usize));
         Ok(result)
     }
 
@@ -375,6 +408,30 @@ impl<'a> Ext4Fs<'a> {
             let tind_block = u32::from_le_bytes(inode.block_data[56..60].try_into()?) as u64;
             if tind_block != 0 {
                 self.read_triple_indirect(&mut result, tind_block, target_size)?;
+            }
+        }
+
+        result.truncate(target_size);
+        Ok(result)
+    }
+
+    fn read_block_map_data_bounded(&self, inode: &Inode, max_bytes: usize) -> Result<Vec<u8>> {
+        let target_size = (inode.size as usize).min(max_bytes);
+        let bs = self.superblock.block_size() as usize;
+        let mut result = Vec::with_capacity(target_size.min(bs * 12));
+
+        for i in 0..12 {
+            if result.len() >= target_size {
+                break;
+            }
+            let block = u32::from_le_bytes(inode.block_data[i * 4..(i + 1) * 4].try_into()?) as u64;
+            self.append_block_or_hole(&mut result, block)?;
+        }
+
+        if result.len() < target_size {
+            let indirect_block = u32::from_le_bytes(inode.block_data[48..52].try_into()?) as u64;
+            if indirect_block != 0 {
+                self.read_indirect(&mut result, indirect_block, target_size)?;
             }
         }
 
@@ -710,6 +767,170 @@ impl<'a> Ext4Fs<'a> {
         }
 
         Ok(deleted)
+    }
+
+    // -----------------------------------------------------------------------
+    // ext4 journal (JBD2) parsing for filename recovery
+    // -----------------------------------------------------------------------
+
+    const JBD2_MAGIC: u32 = 0xC03B_3998;
+    const JBD2_DESCRIPTOR_BLOCK: u32 = 1;
+    const _JBD2_COMMIT_BLOCK: u32 = 2;
+    const JBD2_SUPERBLOCK_V1: u32 = 3;
+    const JBD2_SUPERBLOCK_V2: u32 = 4;
+    const _JBD2_REVOKE_BLOCK: u32 = 5;
+    const JBD2_TAG_FLAG_LAST: u32 = 0x08;
+
+    /// Scan the ext4 journal for historical directory entries and return
+    /// inode → filename mappings for deleted files.
+    pub fn journal_filename_hints(&self) -> Result<HashMap<u64, String>> {
+        let journal_inum = self.superblock.journal_inum;
+        if journal_inum == 0 {
+            return Ok(HashMap::new());
+        }
+
+        let journal_inode = self.read_inode(journal_inum as u64)?;
+        let journal_data = self.read_inode_data(&journal_inode)?;
+        let bs = self.superblock.block_size() as usize;
+
+        if journal_data.len() < bs {
+            return Ok(HashMap::new());
+        }
+
+        // Parse JBD2 superblock (block 0 of journal)
+        let jsb = &journal_data[..bs];
+        let magic = u32::from_be_bytes(jsb[0..4].try_into()?);
+        if magic != Self::JBD2_MAGIC {
+            return Ok(HashMap::new());
+        }
+
+        let block_type = u32::from_be_bytes(jsb[4..8].try_into()?);
+        if block_type != Self::JBD2_SUPERBLOCK_V1 && block_type != Self::JBD2_SUPERBLOCK_V2 {
+            return Ok(HashMap::new());
+        }
+
+        let journal_block_size = u32::from_be_bytes(jsb[12..16].try_into()?) as usize;
+        let maxlen = u32::from_be_bytes(jsb[16..20].try_into()?) as usize;
+
+        // Use filesystem block size if journal block size differs
+        let jbs = if journal_block_size > 0 && journal_block_size <= 65536 {
+            journal_block_size
+        } else {
+            bs
+        };
+
+        let total_journal_blocks = journal_data.len() / jbs;
+        let max_blocks = maxlen.min(total_journal_blocks);
+
+        let mut hints: HashMap<u64, String> = HashMap::new();
+        let has_64bit = self.superblock.feature_incompat & 0x0080 != 0;
+        let tag_size = if has_64bit { 16usize } else { 8usize };
+
+        let mut block_idx = 1; // skip superblock
+        while block_idx < max_blocks {
+            let offset = block_idx * jbs;
+            if offset + 12 > journal_data.len() {
+                break;
+            }
+
+            let header = &journal_data[offset..offset + 12];
+            let h_magic = u32::from_be_bytes(header[0..4].try_into()?);
+            let h_type = u32::from_be_bytes(header[4..8].try_into()?);
+
+            if h_magic != Self::JBD2_MAGIC {
+                block_idx += 1;
+                continue;
+            }
+
+            if h_type == Self::JBD2_DESCRIPTOR_BLOCK {
+                // Parse descriptor tags and check following data blocks
+                let desc_data = &journal_data[offset..offset + jbs];
+                let mut tag_pos = 12; // after header
+                let mut data_block_idx = block_idx + 1;
+
+                while tag_pos + tag_size <= desc_data.len() && data_block_idx < max_blocks {
+                    let flags = u32::from_be_bytes(
+                        desc_data[tag_pos + 4..tag_pos + 8].try_into().unwrap_or([0; 4]),
+                    );
+
+                    // The data block at data_block_idx contains old FS data
+                    let data_offset = data_block_idx * jbs;
+                    if data_offset + jbs <= journal_data.len() {
+                        let data_block = &journal_data[data_offset..data_offset + jbs];
+                        if let Some(dir_entries) = self.try_parse_journal_dir_block(data_block) {
+                            for (inode, name) in dir_entries {
+                                hints.insert(inode, name);
+                            }
+                        }
+                    }
+
+                    data_block_idx += 1;
+
+                    // UUID follows if bit 0x02 is NOT set (SAME_UUID)
+                    let uuid_extra = if flags & 0x02 == 0 { 16 } else { 0 };
+                    tag_pos += tag_size + uuid_extra;
+
+                    if flags & Self::JBD2_TAG_FLAG_LAST != 0 {
+                        break;
+                    }
+                }
+
+                block_idx = data_block_idx;
+            } else {
+                block_idx += 1;
+            }
+        }
+
+        Ok(hints)
+    }
+
+    /// Try to parse a raw data block as ext4 directory entries.
+    /// Returns Some(vec of (inode, name)) if the block looks like a directory.
+    fn try_parse_journal_dir_block(&self, data: &[u8]) -> Option<Vec<(u64, String)>> {
+        let bs = data.len();
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        let mut rec_len_sum = 0usize;
+
+        while pos + 8 <= bs {
+            let inode = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as u64;
+            let rec_len = u16::from_le_bytes(data[pos + 4..pos + 6].try_into().ok()?) as usize;
+            let name_len = data[pos + 6] as usize;
+            let file_type_byte = data[pos + 7];
+
+            if rec_len < 8 || !rec_len.is_multiple_of(4) {
+                return None;
+            }
+
+            if pos + rec_len > bs {
+                return None;
+            }
+
+            rec_len_sum += rec_len;
+
+            if inode != 0 && name_len > 0 && file_type_byte <= 7 {
+                if pos + 8 + name_len > pos + rec_len {
+                    return None;
+                }
+                let name_bytes = &data[pos + 8..pos + 8 + name_len];
+                if name_bytes.iter().any(|&b| b == 0 || b == b'/') {
+                    return None;
+                }
+                let name = String::from_utf8_lossy(name_bytes).to_string();
+                if name != "." && name != ".." {
+                    entries.push((inode, name));
+                }
+            }
+
+            pos += rec_len;
+        }
+
+        // The rec_len chain must exactly fill the block
+        if rec_len_sum != bs || entries.is_empty() {
+            return None;
+        }
+
+        Some(entries)
     }
 }
 

@@ -1437,3 +1437,204 @@ fn ext4_with_1k_block_size() {
     assert!(entries.iter().any(|e| e.name == "."));
     assert!(entries.iter().any(|e| e.name == ".."));
 }
+
+// ===========================================================================
+// JOURNAL: parse JBD2 journal for filename hints
+// ===========================================================================
+
+#[test]
+fn journal_filename_hints_extracts_names_from_journal_dir_blocks() {
+    // Build an image with 128 blocks (plenty of room for journal data).
+    // Journal inode (8) will point to blocks 40-49 using extents.
+    // The journal contains: JBD2 superblock (block 0), descriptor (block 1),
+    // data block (block 2) that is a directory block with (inode 42, "recovered.txt").
+    let mut builder = Ext4ImageBuilder::new(128);
+    builder.write_superblock("journal-test");
+    builder.write_block_group_descriptor(0, 3);
+
+    // Set journal_inum = 8 in superblock at offset 0xE0
+    let sb = 1024usize;
+    builder.write_u32(sb + 0xE0, 8);
+
+    // Root inode (#2) — directory at block 10
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, "..")]);
+
+    // Journal inode (#8) — points to block 40 with 10 blocks of journal data
+    let journal_blocks = 10u16;
+    let journal_size = journal_blocks as u64 * 4096;
+    builder.write_inode_with_extent(8, 0x8000 | 0o600, journal_size, 40, journal_blocks);
+
+    // Build journal data in the image blocks starting at block 40
+    let bs = 4096usize;
+
+    // Block 40 (journal block 0): JBD2 superblock
+    {
+        let off = 40 * bs;
+        // JBD2 magic (big-endian)
+        builder.data[off..off + 4].copy_from_slice(&0xC03B_3998u32.to_be_bytes());
+        // block_type = 4 (superblock v2, big-endian)
+        builder.data[off + 4..off + 8].copy_from_slice(&4u32.to_be_bytes());
+        // sequence = 1
+        builder.data[off + 8..off + 12].copy_from_slice(&1u32.to_be_bytes());
+        // block_size = 4096
+        builder.data[off + 12..off + 16].copy_from_slice(&4096u32.to_be_bytes());
+        // maxlen = 10
+        builder.data[off + 16..off + 20].copy_from_slice(&10u32.to_be_bytes());
+        // first = 1
+        builder.data[off + 20..off + 24].copy_from_slice(&1u32.to_be_bytes());
+        // first_sequence = 1
+        builder.data[off + 24..off + 28].copy_from_slice(&1u32.to_be_bytes());
+        // first_block = 1
+        builder.data[off + 28..off + 32].copy_from_slice(&1u32.to_be_bytes());
+    }
+
+    // Block 41 (journal block 1): Descriptor block
+    {
+        let off = 41 * bs;
+        // JBD2 magic
+        builder.data[off..off + 4].copy_from_slice(&0xC03B_3998u32.to_be_bytes());
+        // block_type = 1 (descriptor)
+        builder.data[off + 4..off + 8].copy_from_slice(&1u32.to_be_bytes());
+        // sequence = 1
+        builder.data[off + 8..off + 12].copy_from_slice(&1u32.to_be_bytes());
+
+        // Descriptor tag at offset 12:
+        // For 64-bit mode (feature_incompat has 0x80): tags are 16 bytes
+        // fs_block_lo (4 bytes) + flags (4 bytes) + fs_block_hi (4 bytes) + checksum (4 bytes)
+        // The flags: bit 0x02 = SAME_UUID (skip uuid), bit 0x08 = LAST_TAG
+        let tag_off = off + 12;
+        // fs_block_lo = 999 (arbitrary, doesn't matter for our heuristic approach)
+        builder.data[tag_off..tag_off + 4].copy_from_slice(&999u32.to_be_bytes());
+        // flags = SAME_UUID (0x02) | LAST_TAG (0x08) = 0x0A
+        builder.data[tag_off + 4..tag_off + 8].copy_from_slice(&0x0Au32.to_be_bytes());
+    }
+
+    // Block 42 (journal block 2): Data block containing directory entries
+    // This is the "old" version of a directory block with entries for deleted files
+    {
+        let off = 42 * bs;
+        let mut pos = 0;
+
+        // Entry 1: "." (inode 100, type 2=directory)
+        let name = b".";
+        let rec_len = 12u16; // 8 + 1, aligned to 4
+        builder.data[off + pos..off + pos + 4].copy_from_slice(&100u32.to_le_bytes());
+        builder.data[off + pos + 4..off + pos + 6].copy_from_slice(&rec_len.to_le_bytes());
+        builder.data[off + pos + 6] = 1; // name_len
+        builder.data[off + pos + 7] = 2; // file_type = directory
+        builder.data[off + pos + 8..off + pos + 8 + name.len()].copy_from_slice(name);
+        pos += rec_len as usize;
+
+        // Entry 2: ".." (inode 2, type 2)
+        let name = b"..";
+        let rec_len = 12u16;
+        builder.data[off + pos..off + pos + 4].copy_from_slice(&2u32.to_le_bytes());
+        builder.data[off + pos + 4..off + pos + 6].copy_from_slice(&rec_len.to_le_bytes());
+        builder.data[off + pos + 6] = 2;
+        builder.data[off + pos + 7] = 2;
+        builder.data[off + pos + 8..off + pos + 8 + name.len()].copy_from_slice(name);
+        pos += rec_len as usize;
+
+        // Entry 3: "recovered.txt" (inode 42, type 1=regular file)
+        let name = b"recovered.txt";
+        let rec_len = (bs - pos) as u16; // fill rest of block
+        builder.data[off + pos..off + pos + 4].copy_from_slice(&42u32.to_le_bytes());
+        builder.data[off + pos + 4..off + pos + 6].copy_from_slice(&rec_len.to_le_bytes());
+        builder.data[off + pos + 6] = name.len() as u8;
+        builder.data[off + pos + 7] = 1; // file_type = regular
+        builder.data[off + pos + 8..off + pos + 8 + name.len()].copy_from_slice(name);
+    }
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    assert_eq!(fs.superblock.journal_inum, 8);
+
+    let hints = fs.journal_filename_hints().unwrap();
+    assert!(
+        hints.contains_key(&42),
+        "should find inode 42 in journal hints: {:?}",
+        hints
+    );
+    assert_eq!(hints[&42], "recovered.txt");
+}
+
+#[test]
+fn journal_filename_hints_returns_empty_for_no_journal() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("no-journal");
+    builder.write_block_group_descriptor(0, 3);
+
+    // journal_inum defaults to 0 (no journal)
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, "..")]);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let hints = fs.journal_filename_hints().unwrap();
+    assert!(hints.is_empty());
+}
+
+#[test]
+fn journal_with_non_directory_data_produces_no_hints() {
+    // Journal contains data blocks that are NOT directory entries (random data).
+    // journal_filename_hints should silently skip them and return empty.
+    let mut builder = Ext4ImageBuilder::new(128);
+    builder.write_superblock("jrnl-nodir");
+    builder.write_block_group_descriptor(0, 3);
+
+    let sb = 1024usize;
+    builder.write_u32(sb + 0xE0, 8); // journal_inum = 8
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, "..")]);
+
+    let journal_blocks = 5u16;
+    builder.write_inode_with_extent(8, 0x8000 | 0o600, journal_blocks as u64 * 4096, 40, journal_blocks);
+
+    let bs = 4096usize;
+
+    // JBD2 superblock at block 40
+    {
+        let off = 40 * bs;
+        builder.data[off..off + 4].copy_from_slice(&0xC03B_3998u32.to_be_bytes());
+        builder.data[off + 4..off + 8].copy_from_slice(&4u32.to_be_bytes());
+        builder.data[off + 8..off + 12].copy_from_slice(&1u32.to_be_bytes());
+        builder.data[off + 12..off + 16].copy_from_slice(&4096u32.to_be_bytes());
+        builder.data[off + 16..off + 20].copy_from_slice(&5u32.to_be_bytes());
+        builder.data[off + 20..off + 24].copy_from_slice(&1u32.to_be_bytes());
+    }
+
+    // Descriptor at block 41 with one tag pointing to data block
+    {
+        let off = 41 * bs;
+        builder.data[off..off + 4].copy_from_slice(&0xC03B_3998u32.to_be_bytes());
+        builder.data[off + 4..off + 8].copy_from_slice(&1u32.to_be_bytes());
+        builder.data[off + 8..off + 12].copy_from_slice(&1u32.to_be_bytes());
+        let tag_off = off + 12;
+        builder.data[tag_off..tag_off + 4].copy_from_slice(&50u32.to_be_bytes());
+        builder.data[tag_off + 4..tag_off + 8].copy_from_slice(&0x0Au32.to_be_bytes());
+    }
+
+    // Data block at block 42 = random non-directory data
+    {
+        let off = 42 * bs;
+        for i in 0..bs {
+            builder.data[off + i] = ((i * 7 + 13) % 256) as u8;
+        }
+    }
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let hints = fs.journal_filename_hints().unwrap();
+    assert!(hints.is_empty(), "non-directory data should produce no hints");
+}
