@@ -270,6 +270,7 @@ impl<'a> Recoverer<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn recover_recursive_with_visited(
         &self,
         ext4: &Ext4Fs,

@@ -78,8 +78,6 @@ impl LvInfo {
     }
 }
 
-/// Check if a partition contains an LVM PV by looking for "LABELONE" magic.
-/// Searches sectors 0–3 (the label can be in any of the first 4 sectors).
 // ---------------------------------------------------------------------------
 // LvReader — virtual reader for multi-segment LVs
 // ---------------------------------------------------------------------------
@@ -456,11 +454,10 @@ pub fn parse_vg_config(
 
         if in_segment {
             // Detect thin provisioning segment types
-            if trimmed.starts_with("type") && trimmed.contains('=') {
-                if trimmed.contains("thin-pool") || trimmed.contains("thin") {
+            if trimmed.starts_with("type") && trimmed.contains('=')
+                && (trimmed.contains("thin-pool") || trimmed.contains("thin")) {
                     lv_is_thin = true;
                 }
-            }
             if let Some(val) = parse_config_u64(trimmed, "start_extent") {
                 seg_start_extent = val;
             }

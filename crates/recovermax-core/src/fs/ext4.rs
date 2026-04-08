@@ -538,7 +538,7 @@ impl<'a> Ext4Fs<'a> {
     /// Append one block of data, or a block-sized hole if block == 0 (sparse file).
     fn append_block_or_hole(&self, result: &mut Vec<u8>, block: u64) -> Result<()> {
         if block == 0 {
-            result.extend(std::iter::repeat(0u8).take(self.superblock.block_size() as usize));
+            result.extend(std::iter::repeat_n(0u8, self.superblock.block_size() as usize));
         } else {
             let data = self.read_block(block)?;
             result.extend_from_slice(data);
@@ -783,7 +783,7 @@ impl<'a> Ext4Fs<'a> {
         let inode_size = self.superblock.inode_size as usize;
         let inodes_per_group = self.superblock.inodes_per_group;
         let block_size = self.superblock.block_size() as usize;
-        let num_groups = (self.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+        let num_groups = self.superblock.inodes_count.div_ceil(inodes_per_group);
         let inodes_per_block = block_size / inode_size;
 
         for group in 0..num_groups {
@@ -796,7 +796,7 @@ impl<'a> Ext4Fs<'a> {
             }
 
             let inode_table_blocks =
-                (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+                (inodes_per_group as usize * inode_size).div_ceil(block_size);
 
             for tbl_block in 0..inode_table_blocks {
                 let abs_block = bg.inode_table + tbl_block as u64;
@@ -1104,7 +1104,7 @@ fn parse_directory_entries(data: &[u8], parent_inode: &Inode) -> Result<Vec<DirE
         let min_record_len = directory_entry_record_len(name_len);
         let file_type = directory_entry_file_type(file_type_byte);
         let is_plausible = rec_len >= 8
-            && rec_len % 4 == 0
+            && rec_len.is_multiple_of(4)
             && record_end <= data.len()
             && name_len > 0
             && pos + 8 + name_len <= record_end
@@ -1166,7 +1166,7 @@ fn scan_deleted_directory_slack(
         let min_record_len = directory_entry_record_len(name_len);
         let file_type = directory_entry_file_type(file_type_byte);
         let looks_valid = rec_len >= 8
-            && rec_len % 4 == 0
+            && rec_len.is_multiple_of(4)
             && name_len > 0
             && rec_len >= min_record_len
             && record_end <= data.len()

@@ -391,7 +391,7 @@ impl<'a> Scanner<'a> {
             offset += step;
             steps_done += 1;
 
-            if steps_done % log_interval == 0 {
+            if steps_done.is_multiple_of(log_interval) {
                 tracing::info!(
                     "Deep scan progress: {} / {} ({:.1}%)",
                     bytesize::ByteSize(offset - part_offset),
@@ -440,7 +440,7 @@ impl<'a> Scanner<'a> {
             offset += pe_size;
             pe_index += 1;
 
-            if pe_index % 1000 == 0 {
+            if pe_index.is_multiple_of(1000) {
                 tracing::info!("PE scan: checked {} extents...", pe_index);
             }
         }

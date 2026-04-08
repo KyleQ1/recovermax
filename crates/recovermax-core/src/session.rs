@@ -975,16 +975,13 @@ fn build_ext4_subtree(
                         depth + 1,
                     )?;
                 }
-                Err(err) => warnings.push(format!(
-                    "{}",
-                    format_traversal_warning(
+                Err(err) => warnings.push(format_traversal_warning(
                         &normalized_path,
                         &format!(
                             "failed to read directory children (inode {}): {}",
                             entry.inode, err
                         ),
-                    )
-                )),
+                    ).to_string()),
             }
             visited_dirs.remove(&entry.inode);
         }
@@ -1193,9 +1190,7 @@ fn estimate_path_index_bytes(index: &HashMap<(usize, String), NodeLocation>) -> 
 }
 
 fn estimate_children_index_bytes(index: &HashMap<u64, Vec<NodeLocation>>) -> u64 {
-    index
-        .iter()
-        .map(|(_, children)| {
+    index.values().map(|children| {
             std::mem::size_of::<u64>() as u64
                 + children.len() as u64 * std::mem::size_of::<usize>() as u64
         })

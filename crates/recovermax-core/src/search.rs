@@ -187,6 +187,7 @@ impl<'a> Searcher<'a> {
         session.search(query, options)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_recursive(
         &self,
         ext4: &Ext4Fs,

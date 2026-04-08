@@ -484,7 +484,7 @@ pub fn run(args: Args) -> Result<()> {
             if hash_image {
                 println!("Verifying source image integrity...");
                 let post_hash = ImageHasher::hash_file(&image)?;
-                let matched = image_hash.as_ref().map_or(false, |h| h == &post_hash);
+                let matched = image_hash.as_ref() == Some(&post_hash);
                 println!(
                     "Post-recovery hash: {} ({})",
                     post_hash,
@@ -657,8 +657,8 @@ pub fn run(args: Args) -> Result<()> {
 
                     println!("Found {} deleted inodes:\n", deleted.len());
                     println!(
-                        "{:>8}  {:>12}  {:>10}  {:>8}  {}",
-                        "INODE", "SIZE", "DTIME", "TYPE", "PATH"
+                        "{:>8}  {:>12}  {:>10}  {:>8}  PATH",
+                        "INODE", "SIZE", "DTIME", "TYPE"
                     );
                     println!("{}", "-".repeat(88));
 
@@ -737,10 +737,10 @@ fn run_scan(image: &Path, output: Option<PathBuf>, deep_scan: bool) -> Result<()
     Ok(())
 }
 
-fn select_deleted_filesystem<'a>(
-    report: &'a recovermax_core::scan::ScanReport,
+fn select_deleted_filesystem(
+    report: &recovermax_core::scan::ScanReport,
     requested: Option<usize>,
-) -> Result<(usize, &'a recovermax_core::fs::FsInfo)> {
+) -> Result<(usize, &recovermax_core::fs::FsInfo)> {
     match requested {
         Some(index) => report
             .filesystems

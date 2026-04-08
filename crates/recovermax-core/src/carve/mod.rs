@@ -170,7 +170,7 @@ impl<'a> Carver<'a> {
             }
 
             offset += 512; // sector-aligned scan
-            if offset % (64 * 1024 * 1024) == 0 {
+            if offset.is_multiple_of(64 * 1024 * 1024) {
                 pb.set_position(offset as u64);
             }
         }
