@@ -43,6 +43,7 @@ fn synthetic_session_artifact(image_path: &std::path::Path) -> RecoverySessionAr
             filesystem_index: 0,
             fs_info,
             root_node_id: Some(1),
+            warnings: Vec::new(),
             nodes: vec![
                 SessionNode {
                     id: 1,

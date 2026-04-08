@@ -711,6 +711,59 @@ fn recovery_with_saved_session_artifact() {
     assert_eq!(recovered, content);
 }
 
+#[test]
+fn unreadable_root_directory_preserves_root_only_session_node() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("root-partial");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 200, 1);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+
+    let filesystem = artifact.filesystem_session(0).unwrap();
+    assert_eq!(filesystem.root_node_id, Some(1));
+    assert_eq!(filesystem.nodes.len(), 1);
+    assert_eq!(filesystem.nodes[0].path, "/");
+    assert!(filesystem
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("failed to read root directory")));
+}
+
+#[test]
+fn unreadable_child_directory_keeps_parent_tree_and_warning() {
+    let mut builder = Ext4ImageBuilder::new(64);
+    builder.write_superblock("child-partial");
+    builder.write_block_group_descriptor(0, 3);
+
+    builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+    builder.write_inode_with_extent(12, 0x4000 | 0o755, 4096, 200, 1);
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (12, 2, "broken")]);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = recovermax_core::scan::Scanner::new(&reader);
+    let report = scanner.full_scan().unwrap();
+    let artifact = RecoverySessionArtifact::from_scan(f.path(), &reader, report).unwrap();
+
+    let filesystem = artifact.filesystem_session(0).unwrap();
+    assert!(filesystem.nodes.iter().any(|node| node.path == "/broken"));
+    assert!(
+        filesystem
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("/broken")
+                && warning.contains("failed to read directory"))
+    );
+}
+
 // ===========================================================================
 // Directory with deleted entries
 // ===========================================================================

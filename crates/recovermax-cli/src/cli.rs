@@ -297,7 +297,7 @@ pub fn run(args: Args) -> Result<()> {
 
             let children =
                 list_children_with_fallback(&mut session, node.filesystem_index, &node.path)?;
-            print_directory_listing(&children, long);
+            print_directory_listing(&children, long, session.artifact());
             Ok(())
         }
         Command::Tree {
@@ -317,7 +317,7 @@ pub fn run(args: Args) -> Result<()> {
             let node = resolve_node_for_session(&mut session, fs, &path)?;
             let entries =
                 walk_tree_with_fallback(&mut session, node.filesystem_index, &node.path, depth)?;
-            print_tree_entries(&entries, depth);
+            print_tree_entries(&entries, depth, session.artifact());
             Ok(())
         }
         Command::Stat {
@@ -736,7 +736,7 @@ fn resolve_node_for_session(
     }
 }
 
-fn resolve_recovery_target(
+pub(crate) fn resolve_recovery_target(
     session: &mut RecoverySession,
     filesystem_index: Option<usize>,
     selector: &str,
@@ -1416,7 +1416,7 @@ fn normalize_session_path(path: &str) -> String {
     }
 }
 
-fn recover_with_fallback(
+pub(crate) fn recover_with_fallback(
     session: &mut RecoverySession,
     dest: &Path,
     target: Option<&SessionNode>,
@@ -1485,13 +1485,24 @@ fn warm_session_caches(session: &mut RecoverySession) -> Result<()> {
 fn print_filesystems(session: &RecoverySession) {
     println!("Filesystems:");
     for fs in session.filesystems() {
-        let tree_status = if fs.has_tree() {
-            format!("tree: {} nodes", fs.nodes.len())
+        let mut tree_status = if fs.has_tree() {
+            if fs.has_partial_tree() {
+                format!(
+                    "partial tree: {} nodes, {} warnings",
+                    fs.nodes.len(),
+                    fs.warnings.len()
+                )
+            } else {
+                format!("tree: {} nodes", fs.nodes.len())
+            }
         } else if session.attached_reader().is_some() && fs.fs_info.fs_type == "ext4" {
             "report-only; live-fallback".to_string()
         } else {
             "report-only".to_string()
         };
+        if !fs.has_partial_tree() && !fs.warnings.is_empty() {
+            tree_status.push_str(&format!("; warnings: {}", fs.warnings.len()));
+        }
 
         println!(
             "  [{}] {} \"{}\" ({}) {}",
@@ -1504,22 +1515,31 @@ fn print_filesystems(session: &RecoverySession) {
     }
 }
 
-fn print_directory_listing(entries: &[SessionNode], long: bool) {
+fn print_directory_listing(
+    entries: &[SessionNode],
+    long: bool,
+    artifact: &RecoverySessionArtifact,
+) {
     if entries.is_empty() {
         println!("No entries found.");
         return;
     }
 
     for entry in entries {
+        let partial = node_has_traversal_warning(artifact, entry);
         if long {
-            println!("{}", format_node_long(entry));
+            println!("{}", format_node_long(entry, partial));
         } else {
-            println!("{}", format_node_short(entry));
+            println!("{}", format_node_short(entry, partial));
         }
     }
 }
 
-fn print_tree_entries(entries: &[SessionTreeEntry], max_depth: usize) {
+fn print_tree_entries(
+    entries: &[SessionTreeEntry],
+    max_depth: usize,
+    artifact: &RecoverySessionArtifact,
+) {
     if entries.is_empty() {
         println!("No nodes found.");
         return;
@@ -1531,7 +1551,8 @@ fn print_tree_entries(entries: &[SessionTreeEntry], max_depth: usize) {
         }
 
         let indent = "  ".repeat(entry.depth);
-        println!("{}{}", indent, format_node_short(&entry.node));
+        let partial = node_has_traversal_warning(artifact, &entry.node);
+        println!("{}{}", indent, format_node_short(&entry.node, partial));
     }
 }
 
@@ -1605,6 +1626,15 @@ fn print_stat_node(node: &SessionNode, artifact: &RecoverySessionArtifact) {
         )
     );
     println!("Basename: {}", node.basename);
+    if let Some(filesystem) = artifact.filesystem_session(node.filesystem_index) {
+        let warnings = filesystem.warnings_for_path(&node.path);
+        if !warnings.is_empty() {
+            println!("Traversal: partial");
+            for warning in warnings {
+                println!("Traversal warning: {}", warning);
+            }
+        }
+    }
 }
 
 fn format_optional_unix_timestamp(value: Option<i64>) -> String {
@@ -1692,7 +1722,7 @@ fn print_matches(matches: &[SearchMatch]) {
     println!("\n{} matches", matches.len());
 }
 
-fn format_node_short(node: &SessionNode) -> String {
+fn format_node_short(node: &SessionNode, partial: bool) -> String {
     let marker = match node.file_type {
         FileType::Directory => "d",
         FileType::RegularFile => "-",
@@ -1710,10 +1740,11 @@ fn format_node_short(node: &SessionNode) -> String {
         EntrySource::DeletedSlack => " [slack]",
         EntrySource::SyntheticOrphan => " [orphan]",
     };
-    format!("{} {}{}{}", marker, name, deleted, source)
+    let partial = if partial { " [partial]" } else { "" };
+    format!("{} {}{}{}{}", marker, name, deleted, source, partial)
 }
 
-fn format_node_long(node: &SessionNode) -> String {
+fn format_node_long(node: &SessionNode, partial: bool) -> String {
     let marker = match node.file_type {
         FileType::Directory => "d",
         FileType::RegularFile => "-",
@@ -1740,11 +1771,20 @@ fn format_node_long(node: &SessionNode) -> String {
         ),
         EntrySource::SyntheticOrphan => " source=synthetic-orphan".to_string(),
     };
+    let partial = if partial { " partial" } else { "" };
 
     format!(
-        "{:>1} {:>12} inode={:<8} {}{}{}",
-        marker, size, inode, node.path, deleted, source
+        "{:>1} {:>12} inode={:<8} {}{}{}{}",
+        marker, size, inode, node.path, deleted, source, partial
     )
+}
+
+fn node_has_traversal_warning(artifact: &RecoverySessionArtifact, node: &SessionNode) -> bool {
+    node.file_type == FileType::Directory
+        && artifact
+            .filesystem_session(node.filesystem_index)
+            .map(|filesystem| !filesystem.warnings_for_path(&node.path).is_empty())
+            .unwrap_or(false)
 }
 
 fn file_type_label(file_type: FileType) -> &'static str {
@@ -1860,6 +1900,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: None,
+                warnings: Vec::new(),
                 nodes: Vec::new(),
             }],
         };
@@ -2222,6 +2263,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: Some(1),
+                warnings: Vec::new(),
                 nodes: vec![
                     SessionNode {
                         id: 1,
@@ -2327,6 +2369,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: Some(1),
+                warnings: Vec::new(),
                 nodes: vec![
                     SessionNode {
                         id: 1,
@@ -2443,6 +2486,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: Some(1),
+                warnings: Vec::new(),
                 nodes: vec![
                     SessionNode {
                         id: 1,
@@ -2554,6 +2598,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: Some(1),
+                warnings: Vec::new(),
                 nodes: vec![
                     SessionNode {
                         id: 1,
@@ -2657,6 +2702,7 @@ mod tests {
                     offset: 0,
                 },
                 root_node_id: Some(1),
+                warnings: Vec::new(),
                 nodes: vec![
                     SessionNode {
                         id: 1,
@@ -2815,6 +2861,7 @@ mod tests {
                         offset: 0,
                     },
                     root_node_id: Some(1),
+                    warnings: Vec::new(),
                     nodes: vec![
                         SessionNode {
                             id: 1,
@@ -2857,6 +2904,7 @@ mod tests {
                         offset: 4096,
                     },
                     root_node_id: Some(3),
+                    warnings: Vec::new(),
                     nodes: vec![
                         SessionNode {
                             id: 3,
@@ -2938,6 +2986,7 @@ mod tests {
                         offset: 0,
                     },
                     root_node_id: Some(1),
+                    warnings: Vec::new(),
                     nodes: vec![
                         SessionNode {
                             id: 1,
@@ -2980,6 +3029,7 @@ mod tests {
                         offset: 4096,
                     },
                     root_node_id: Some(3),
+                    warnings: Vec::new(),
                     nodes: vec![
                         SessionNode {
                             id: 3,

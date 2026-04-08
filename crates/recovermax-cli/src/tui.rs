@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{
     deleted_recovery_hint_message, filesystem_has_tree, list_children_with_fallback,
-    resolve_node_with_fallback, search_with_fallback, walk_tree_with_fallback,
+    recover_with_fallback, resolve_node_with_fallback, resolve_recovery_target,
+    search_with_fallback, walk_tree_with_fallback,
 };
 use anyhow::{anyhow, Context, Result};
 use recovermax_core::fs::EntrySource;
@@ -212,6 +213,7 @@ impl<'a> SessionShell<'a> {
                 "stat" => self.command_stat(line)?,
                 "search" => self.command_search(line, None)?,
                 "searchfs" => self.command_searchfs(line)?,
+                "recover" => self.command_recover(line)?,
                 "cache" => self.command_cache(),
                 "unload" => self.command_unload(),
                 "save" => self.command_save(&parts)?,
@@ -242,6 +244,7 @@ impl<'a> SessionShell<'a> {
         println!("  stat <path|inode>      Show node metadata");
         println!("  search <query>         Search the session tree");
         println!("  searchfs <idx> <q>     Search one filesystem");
+        println!("  recover <dest> [path]  Recover current path or a specific target");
         println!("  cache                  Show runtime cache summary");
         println!("  unload                 Evict RecoverMax-managed caches");
         println!("  save <path.scn>        Save current session artifact");
@@ -253,13 +256,16 @@ impl<'a> SessionShell<'a> {
     fn print_filesystems(&self) {
         println!("Filesystems:");
         for (i, fs) in self.session.filesystems().iter().enumerate() {
-            let tree_state = if fs.has_tree() {
+            let mut tree_state = if fs.has_tree() {
                 "tree".to_string()
             } else if self.session.attached_reader().is_some() && fs.fs_info.fs_type == "ext4" {
                 "report-only; live-fallback".to_string()
             } else {
                 "report".to_string()
             };
+            if !fs.warnings.is_empty() {
+                tree_state.push_str(&format!("; warnings: {}", fs.warnings.len()));
+            }
             println!(
                 "  [{}] {} \"{}\" ({}) [{}]",
                 i,
@@ -326,7 +332,8 @@ impl<'a> SessionShell<'a> {
         }
 
         for child in children {
-            println!("{}", format_node_brief(&child));
+            let partial = node_has_traversal_warning(self.session.artifact(), &child);
+            println!("{}", format_node_brief(&child, partial));
         }
         Ok(())
     }
@@ -359,7 +366,8 @@ impl<'a> SessionShell<'a> {
 
         for SessionTreeEntry { depth, node } in entries {
             let indent = "  ".repeat(depth);
-            println!("{}{}", indent, format_node_brief(&node));
+            let partial = node_has_traversal_warning(self.session.artifact(), &node);
+            println!("{}{}", indent, format_node_brief(&node, partial));
         }
         Ok(())
     }
@@ -419,6 +427,23 @@ impl<'a> SessionShell<'a> {
         };
         let matches = self.search(query, &options)?;
         print_matches(&matches);
+        Ok(())
+    }
+
+    fn command_recover(&mut self, line: &str) -> Result<()> {
+        let rest = command_arg(line, "recover");
+        let Some((dest_arg, target_arg)) = parse_recover_args(rest) else {
+            println!("Usage: recover <dest> [path]");
+            return Ok(());
+        };
+
+        let dest = PathBuf::from(dest_arg);
+        let target_path = target_arg
+            .map(|path| self.resolve_path(path))
+            .unwrap_or_else(|| self.current_path.clone());
+        let target = resolve_recovery_target(self.session, Some(self.current_fs), &target_path)?;
+        recover_with_fallback(self.session, &dest, Some(&target), Some(&target_path))?;
+        println!("Recovered {} to {}", target_path, dest.display());
         Ok(())
     }
 
@@ -514,6 +539,14 @@ impl<'a> SessionShell<'a> {
         }
         if let Some(hint) = deleted_recovery_hint_message(self.session, node) {
             println!("Recovery hint: {}", hint);
+        }
+        let warnings =
+            traversal_warnings_for_path(self.session.artifact(), self.current_fs, &node.path);
+        if !warnings.is_empty() {
+            println!("Traversal: partial");
+            for warning in warnings {
+                println!("Traversal warning: {}", warning);
+            }
         }
         if !filesystem_has_tree(self.session, self.current_fs)
             && self.session.attached_reader().is_some()
@@ -682,7 +715,7 @@ fn print_cache_summary(summary: &CacheSummary) {
     println!("  evictions: {}", summary.evictions);
 }
 
-fn format_node_brief(node: &SessionNode) -> String {
+fn format_node_brief(node: &SessionNode, partial: bool) -> String {
     let kind = match node.file_type {
         recovermax_core::fs::FileType::Directory => "d",
         recovermax_core::fs::FileType::RegularFile => "f",
@@ -697,7 +730,7 @@ fn format_node_brief(node: &SessionNode) -> String {
         .unwrap_or_else(|| "-".to_string());
 
     format!(
-        "{} {} {}{}{}",
+        "{} {} {}{}{}{}",
         kind,
         size,
         node.path,
@@ -706,8 +739,25 @@ fn format_node_brief(node: &SessionNode) -> String {
             EntrySource::Filesystem => "",
             EntrySource::DeletedSlack => " [slack]",
             EntrySource::SyntheticOrphan => " [orphan]",
-        }
+        },
+        if partial { " [partial]" } else { "" }
     )
+}
+
+fn traversal_warnings_for_path<'a>(
+    artifact: &'a RecoverySessionArtifact,
+    filesystem_index: usize,
+    path: &str,
+) -> Vec<&'a str> {
+    artifact
+        .filesystem_session(filesystem_index)
+        .map(|filesystem| filesystem.warnings_for_path(path))
+        .unwrap_or_default()
+}
+
+fn node_has_traversal_warning(artifact: &RecoverySessionArtifact, node: &SessionNode) -> bool {
+    node.file_type == recovermax_core::fs::FileType::Directory
+        && !traversal_warnings_for_path(artifact, node.filesystem_index, &node.path).is_empty()
 }
 
 fn entry_source_label(source: EntrySource) -> &'static str {
@@ -750,6 +800,25 @@ fn normalize_path(path: &str) -> String {
     }
 
     format!("/{}", parts.join("/"))
+}
+
+fn parse_recover_args(input: &str) -> Option<(&str, Option<&str>)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let dest = parts.next()?.trim();
+    if dest.is_empty() {
+        return None;
+    }
+
+    let target = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some((dest, target))
 }
 
 #[cfg(test)]
@@ -814,6 +883,20 @@ mod tests {
         assert_eq!(
             format_node_brief(&node),
             "f 712 B /$OrphanFiles/OrphanFile-13 [deleted] [orphan]"
+        );
+    }
+
+    #[test]
+    fn parse_recover_args_supports_optional_target() {
+        assert_eq!(parse_recover_args(""), None);
+        assert_eq!(parse_recover_args(" /tmp/out "), Some(("/tmp/out", None)));
+        assert_eq!(
+            parse_recover_args("/tmp/out ghost.txt"),
+            Some(("/tmp/out", Some("ghost.txt")))
+        );
+        assert_eq!(
+            parse_recover_args("/tmp/out /Bellatrix.txt"),
+            Some(("/tmp/out", Some("/Bellatrix.txt")))
         );
     }
 }

@@ -53,6 +53,7 @@ fn report_only_artifact(image_path: &std::path::Path) -> RecoverySessionArtifact
                 offset: 0,
             },
             root_node_id: None,
+            warnings: Vec::new(),
             nodes: Vec::new(),
         }],
     }

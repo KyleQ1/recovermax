@@ -42,6 +42,7 @@ fn synthetic_artifact() -> RecoverySessionArtifact {
                 offset: 0,
             },
             root_node_id: Some(1),
+            warnings: Vec::new(),
             nodes: vec![
                 SessionNode {
                     id: 1,

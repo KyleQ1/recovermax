@@ -199,12 +199,27 @@ pub struct FilesystemSessionArtifact {
     pub fs_info: FsInfo,
     pub root_node_id: Option<u64>,
     #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
     pub nodes: Vec<SessionNode>,
 }
 
 impl FilesystemSessionArtifact {
     pub fn has_tree(&self) -> bool {
         self.root_node_id.is_some() && !self.nodes.is_empty()
+    }
+
+    pub fn has_partial_tree(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    pub fn warnings_for_path(&self, path: &str) -> Vec<&str> {
+        let normalized = normalize_session_path(path);
+        self.warnings
+            .iter()
+            .filter(|warning| traversal_warning_matches_path(warning, &normalized))
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -735,6 +750,7 @@ fn build_filesystem_sessions(
                 filesystem_index,
                 fs_info: fs_info.clone(),
                 root_node_id: None,
+                warnings: Vec::new(),
                 nodes: Vec::new(),
             });
             continue;
@@ -753,6 +769,13 @@ fn build_filesystem_sessions(
                     filesystem_index,
                     fs_info: fs_info.clone(),
                     root_node_id: None,
+                    warnings: vec![format_traversal_warning(
+                        "/",
+                        &format!(
+                            "failed to open ext4 filesystem at offset {}: {}",
+                            fs_info.offset, err
+                        ),
+                    )],
                     nodes: Vec::new(),
                 });
                 continue;
@@ -771,6 +794,13 @@ fn build_filesystem_sessions(
                     filesystem_index,
                     fs_info: fs_info.clone(),
                     root_node_id: None,
+                    warnings: vec![format_traversal_warning(
+                        "/",
+                        &format!(
+                            "failed to read root inode at offset {}: {}",
+                            fs_info.offset, err
+                        ),
+                    )],
                     nodes: Vec::new(),
                 });
                 continue;
@@ -793,6 +823,7 @@ fn build_filesystem_sessions(
             parent_inode: None,
             timestamps: session_timestamps_from_inode(&root_inode),
         }];
+        let mut warnings = Vec::new();
 
         match ext4.list_directory(2) {
             Ok(root_entries) => {
@@ -806,6 +837,7 @@ fn build_filesystem_sessions(
                     &mut visited_dirs,
                     &mut next_node_id,
                     &mut nodes,
+                    &mut warnings,
                     0,
                 ) {
                     tracing::warn!(
@@ -814,16 +846,23 @@ fn build_filesystem_sessions(
                         fs_info.offset,
                         err
                     );
+                    warnings.push(format_traversal_warning(
+                        "/",
+                        &format!("failed to build full session tree: {}", err),
+                    ));
                 }
             }
             Err(err) => {
                 tracing::warn!(
-                    "failed to read root directory for filesystem {} at offset {}; saving report-only session: {}",
+                    "failed to read root directory for filesystem {} at offset {}; preserving root-only session: {}",
                     filesystem_index,
                     fs_info.offset,
                     err
                 );
-                nodes.clear();
+                warnings.push(format_traversal_warning(
+                    "/",
+                    &format!("failed to read root directory: {}", err),
+                ));
             }
         }
 
@@ -834,6 +873,7 @@ fn build_filesystem_sessions(
                 root_id,
                 &mut next_node_id,
                 &mut nodes,
+                &mut warnings,
             );
         }
 
@@ -845,6 +885,7 @@ fn build_filesystem_sessions(
             } else {
                 Some(root_id)
             },
+            warnings,
             nodes,
         });
     }
@@ -862,6 +903,7 @@ fn build_ext4_subtree(
     visited_dirs: &mut HashSet<u64>,
     next_node_id: &mut u64,
     nodes: &mut Vec<SessionNode>,
+    warnings: &mut Vec<String>,
     depth: usize,
 ) -> Result<()> {
     if depth >= MAX_TREE_DEPTH {
@@ -916,18 +958,31 @@ fn build_ext4_subtree(
         });
 
         if file_type == FileType::Directory && entry.inode > 0 && visited_dirs.insert(entry.inode) {
-            if let Ok(children) = ext4.list_directory(entry.inode) {
-                build_ext4_subtree(
-                    ext4,
-                    filesystem_index,
-                    node_id,
-                    path_buf,
-                    &children,
-                    visited_dirs,
-                    next_node_id,
-                    nodes,
-                    depth + 1,
-                )?;
+            match ext4.list_directory(entry.inode) {
+                Ok(children) => {
+                    build_ext4_subtree(
+                        ext4,
+                        filesystem_index,
+                        node_id,
+                        path_buf,
+                        &children,
+                        visited_dirs,
+                        next_node_id,
+                        nodes,
+                        warnings,
+                        depth + 1,
+                    )?;
+                }
+                Err(err) => warnings.push(format!(
+                    "{}",
+                    format_traversal_warning(
+                        &normalized_path,
+                        &format!(
+                            "failed to read directory children (inode {}): {}",
+                            entry.inode, err
+                        ),
+                    )
+                )),
             }
             visited_dirs.remove(&entry.inode);
         }
@@ -942,6 +997,7 @@ fn append_ext4_deleted_orphans(
     root_id: u64,
     next_node_id: &mut u64,
     nodes: &mut Vec<SessionNode>,
+    warnings: &mut Vec<String>,
 ) {
     let deleted_inodes = match ext4.scan_deleted_inodes() {
         Ok(deleted) => deleted,
@@ -1022,6 +1078,7 @@ fn append_ext4_deleted_orphans(
                         &mut visited_dirs,
                         next_node_id,
                         nodes,
+                        warnings,
                         0,
                     ) {
                         tracing::warn!(
@@ -1030,6 +1087,13 @@ fn append_ext4_deleted_orphans(
                             filesystem_index,
                             err
                         );
+                        warnings.push(format_traversal_warning(
+                            &format!("/$OrphanFiles/{}", orphan_basename),
+                            &format!(
+                                "failed to build deleted orphan subtree for inode {}: {}",
+                                orphan.inode_num, err
+                            ),
+                        ));
                     } else {
                         for node in &nodes[subtree_start..] {
                             if let Some(inode) = node.inode {
@@ -1045,6 +1109,13 @@ fn append_ext4_deleted_orphans(
                         filesystem_index,
                         err
                     );
+                    warnings.push(format_traversal_warning(
+                        &format!("/$OrphanFiles/{}", orphan_basename),
+                        &format!(
+                            "failed to read deleted orphan directory inode {}: {}",
+                            orphan.inode_num, err
+                        ),
+                    ));
                 }
             }
         }
@@ -1060,9 +1131,36 @@ fn minimal_filesystem_sessions(report: &ScanReport) -> Vec<FilesystemSessionArti
             filesystem_index,
             fs_info: fs_info.clone(),
             root_node_id: None,
+            warnings: Vec::new(),
             nodes: Vec::new(),
         })
         .collect()
+}
+
+fn format_traversal_warning(path: &str, message: &str) -> String {
+    format!("path {}: {}", normalize_session_path(path), message)
+}
+
+fn traversal_warning_matches_path(warning: &str, normalized_path: &str) -> bool {
+    if let Some(path) = traversal_warning_path(warning) {
+        return path == normalized_path;
+    }
+
+    if normalized_path == "/" {
+        return warning.contains("root directory")
+            || warning.contains("root inode")
+            || warning.contains("open ext4 filesystem")
+            || warning.contains("full session tree");
+    }
+
+    warning.contains(&format!("directory {}", normalized_path))
+}
+
+fn traversal_warning_path(warning: &str) -> Option<&str> {
+    warning
+        .strip_prefix("path ")
+        .and_then(|rest| rest.split_once(": "))
+        .map(|(path, _)| path)
 }
 
 fn normalize_session_path(path: &str) -> String {
