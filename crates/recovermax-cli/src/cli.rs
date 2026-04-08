@@ -842,10 +842,10 @@ fn unique_orphan_recovery_candidate(
 ) -> Option<SessionNode> {
     let mut candidates = orphan_recovery_candidates(session, node)?;
     if candidates.len() == 1 {
-        candidates.pop()
-    } else {
-        None
+        return candidates.pop();
     }
+
+    strongly_matched_orphan_recovery_candidate(session, node, &candidates)
 }
 
 fn orphan_recovery_candidates(
@@ -878,6 +878,107 @@ fn orphan_recovery_candidates(
         .collect::<Vec<_>>();
     candidates.sort_by(candidate_sort_key);
     Some(candidates)
+}
+
+fn strongly_matched_orphan_recovery_candidate(
+    session: &RecoverySession,
+    node: &SessionNode,
+    candidates: &[SessionNode],
+) -> Option<SessionNode> {
+    let expected_kind = expected_content_kind_for_path(&node.path)?;
+    let reader = session.attached_reader()?;
+    let filesystem = session
+        .artifact()
+        .filesystem_session(node.filesystem_index)?;
+    if filesystem.fs_info.fs_type != "ext4" {
+        return None;
+    }
+
+    let ext4 = Ext4Fs::new(reader, filesystem.fs_info.offset).ok()?;
+    let mut matching = Vec::new();
+
+    for candidate in candidates {
+        let actual_kind = sniff_candidate_content_kind(&ext4, candidate)?;
+        if actual_kind == expected_kind {
+            matching.push(candidate.clone());
+        } else if actual_kind == CandidateContentKind::Unknown {
+            return None;
+        }
+    }
+
+    if matching.len() == 1 {
+        matching.pop()
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateContentKind {
+    Text,
+    Pdf,
+    Png,
+    Jpeg,
+    Gif,
+    Zip,
+    Unknown,
+}
+
+fn expected_content_kind_for_path(path: &str) -> Option<CandidateContentKind> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "txt" | "md" | "csv" | "log" | "json" | "xml" | "html" | "htm" | "rs" | "c" | "cpp"
+        | "h" | "toml" | "yaml" | "yml" => Some(CandidateContentKind::Text),
+        "pdf" => Some(CandidateContentKind::Pdf),
+        "png" => Some(CandidateContentKind::Png),
+        "jpg" | "jpeg" => Some(CandidateContentKind::Jpeg),
+        "gif" => Some(CandidateContentKind::Gif),
+        "zip" => Some(CandidateContentKind::Zip),
+        _ => None,
+    }
+}
+
+fn sniff_candidate_content_kind(
+    ext4: &Ext4Fs<'_>,
+    candidate: &SessionNode,
+) -> Option<CandidateContentKind> {
+    let inode_num = candidate.inode?;
+    let inode = ext4.read_inode(inode_num).ok()?;
+    let data = ext4.read_inode_data(&inode).ok()?;
+    Some(sniff_content_kind(&data))
+}
+
+fn sniff_content_kind(data: &[u8]) -> CandidateContentKind {
+    if data.starts_with(b"%PDF-") {
+        return CandidateContentKind::Pdf;
+    }
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return CandidateContentKind::Png;
+    }
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return CandidateContentKind::Jpeg;
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return CandidateContentKind::Gif;
+    }
+    if data.starts_with(b"PK\x03\x04") {
+        return CandidateContentKind::Zip;
+    }
+    if data.is_empty() {
+        return CandidateContentKind::Unknown;
+    }
+
+    let sample = &data[..data.len().min(512)];
+    let printable = sample
+        .iter()
+        .filter(|byte| matches!(**byte, b'\n' | b'\r' | b'\t') || !byte.is_ascii_control())
+        .count();
+    let nul_bytes = sample.iter().filter(|byte| **byte == 0).count();
+    if nul_bytes == 0 && printable * 10 >= sample.len() * 9 {
+        CandidateContentKind::Text
+    } else {
+        CandidateContentKind::Unknown
+    }
 }
 
 fn candidate_sort_key(left: &SessionNode, right: &SessionNode) -> std::cmp::Ordering {
@@ -2162,6 +2263,34 @@ mod tests {
         (image_path, bytes)
     }
 
+    fn build_report_only_multi_orphan_fixture() -> (PathBuf, Vec<u8>) {
+        let mut builder = Ext4ImageBuilder::new(96);
+        builder.write_superblock("report-multi-orphan");
+        builder.write_bgdt(0, 3);
+
+        builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
+        builder.write_inode_with_extent(11, 0x8000 | 0o644, 13, 20, 1);
+        builder.write_inode_with_extent(13, 0x8000 | 0o644, 18, 30, 1);
+        builder.write_inode_with_extent(14, 0x8000 | 0o644, 8, 31, 1);
+
+        builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")]);
+        builder.write_data(20, b"Hello, world!");
+        builder.write_data(30, b"plain text orphan\n");
+        builder.write_data(31, b"\x89PNG\r\n\x1a\n");
+
+        let inode13_off = 3 * 4096 + 12 * 256;
+        builder.write_u16(inode13_off + 26, 0);
+        builder.write_u32(inode13_off + 20, 1_234_500_001);
+
+        let inode14_off = 3 * 4096 + 13 * 256;
+        builder.write_u16(inode14_off + 26, 0);
+        builder.write_u32(inode14_off + 20, 1_234_500_002);
+
+        let bytes = builder.build();
+        let image_path = write_test_image(&bytes);
+        (image_path, bytes)
+    }
+
     fn build_report_only_orphan_directory_fixture() -> (PathBuf, Vec<u8>) {
         let mut builder = Ext4ImageBuilder::new(96);
         builder.write_superblock("report-orphan-dir");
@@ -2423,6 +2552,127 @@ mod tests {
         let resolved = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap();
         assert_eq!(resolved.path, "/$OrphanFiles/OrphanFile-99");
         assert_eq!(resolved.inode, Some(99));
+    }
+
+    #[test]
+    fn deleted_residual_path_auto_resolves_strong_extension_match() {
+        let (image_path, _) = build_report_only_multi_orphan_fixture();
+        let reader = ImageReader::open(&image_path).unwrap();
+        let image_size = reader.len();
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: image_path.clone(),
+                image_size,
+            },
+            report: ScanReport {
+                image_size,
+                partitions: vec![Partition {
+                    name: "p1".to_string(),
+                    offset: 0,
+                    size: image_size,
+                    fs_type: "Linux".to_string(),
+                }],
+                filesystems: vec![FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: image_size,
+                    offset: 0,
+                }],
+            },
+            filesystems: vec![FilesystemSessionArtifact {
+                filesystem_index: 0,
+                fs_info: FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: image_size,
+                    offset: 0,
+                },
+                root_node_id: Some(1),
+                warnings: Vec::new(),
+                nodes: vec![
+                    SessionNode {
+                        id: 1,
+                        parent_id: None,
+                        filesystem_index: 0,
+                        inode: Some(2),
+                        basename: "/".to_string(),
+                        path: "/".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: Some(4096),
+                        source: EntrySource::Filesystem,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 2,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "ghost.txt".to_string(),
+                        path: "/ghost.txt".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: None,
+                        source: EntrySource::DeletedSlack,
+                        parent_inode: Some(2),
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 3,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "$OrphanFiles".to_string(),
+                        path: "/$OrphanFiles".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: None,
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 4,
+                        parent_id: Some(3),
+                        filesystem_index: 0,
+                        inode: Some(13),
+                        basename: "OrphanFile-13".to_string(),
+                        path: "/$OrphanFiles/OrphanFile-13".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: Some(18),
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 5,
+                        parent_id: Some(3),
+                        filesystem_index: 0,
+                        inode: Some(14),
+                        basename: "OrphanFile-14".to_string(),
+                        path: "/$OrphanFiles/OrphanFile-14".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: Some(8),
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                ],
+            }],
+        };
+
+        let mut session = RecoverySession::from_artifact_with_reader(artifact, reader, None);
+        let resolved = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap();
+        assert_eq!(resolved.path, "/$OrphanFiles/OrphanFile-13");
+        assert_eq!(resolved.inode, Some(13));
     }
 
     #[test]
