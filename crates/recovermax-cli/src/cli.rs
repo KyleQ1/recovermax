@@ -817,9 +817,16 @@ impl ScanDisplay {
             ScanEvent::PhaseComplete { .. } => {}
             ScanEvent::TreeBuildStarted { .. } => {
                 self.current_phase = ScanPhase::TreeBuilding;
+                self.bytes_scanned = 0;
+                self.phase_total_bytes = 0;
                 self.phase_start_time = Instant::now();
             }
-            ScanEvent::TreeBuildProgress { .. } | ScanEvent::TreeBuildComplete { .. } => {}
+            ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
+                self.bytes_scanned = (*files_found + *dirs_found) as u64;
+            }
+            ScanEvent::TreeBuildComplete { total_nodes, .. } => {
+                self.bytes_scanned = *total_nodes as u64;
+            }
         }
     }
 
@@ -1032,8 +1039,58 @@ fn run_scan(
     println!("\n{}", report.summary());
 
     if let Some(path) = output {
-        println!("Building session tree...");
-        let artifact = RecoverySessionArtifact::from_scan(image, &reader, report.clone())?;
+        // Reuse the same display for tree building progress
+        let display_clone2 = Arc::clone(&display);
+        let block_bar2 = block_bar.clone();
+        let progress_bar2 = progress_bar.clone();
+        let stats_bar2 = stats_bar.clone();
+
+        let tree_callback = move |event: ScanEvent| {
+            let mut state = display_clone2.lock().unwrap();
+            state.handle_event(&event);
+
+            block_bar2.set_message(state.render_block_map());
+
+            match state.current_phase {
+                ScanPhase::TreeBuilding => {
+                    progress_bar2.set_length(0);
+                    progress_bar2.set_position(state.bytes_scanned);
+                    progress_bar2.set_message(format!(
+                        " | Building file tree: {} entries{}",
+                        state.bytes_scanned,
+                        state.speed_str(),
+                    ));
+                }
+                _ => {
+                    progress_bar2.set_length(state.phase_total_bytes);
+                    progress_bar2.set_position(state.bytes_scanned);
+                    progress_bar2.set_message(format!(
+                        " | {}{}{}",
+                        state.phase_name(),
+                        state.speed_str(),
+                        state.eta_str(),
+                    ));
+                }
+            }
+
+            stats_bar2.set_message(format!(
+                "Filesystems: {} | File signatures: {}",
+                state.fs_summary(),
+                state.file_types_found,
+            ));
+        };
+
+        let artifact = RecoverySessionArtifact::from_scan_with_callback(
+            image,
+            &reader,
+            report.clone(),
+            Some(&tree_callback),
+        )?;
+
+        block_bar.finish_and_clear();
+        progress_bar.finish_and_clear();
+        stats_bar.finish_and_clear();
+
         artifact.save_to_path(&path)?;
         println!("Session saved to {}", path.display());
     }

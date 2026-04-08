@@ -32,7 +32,16 @@ impl RecoverySessionArtifact {
     pub const VERSION: u32 = 2;
 
     pub fn from_scan(image_path: &Path, reader: &ImageReader, report: ScanReport) -> Result<Self> {
-        let filesystems = build_filesystem_sessions(reader, &report)?;
+        Self::from_scan_with_callback(image_path, reader, report, None)
+    }
+
+    pub fn from_scan_with_callback(
+        image_path: &Path,
+        reader: &ImageReader,
+        report: ScanReport,
+        on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+    ) -> Result<Self> {
+        let filesystems = build_filesystem_sessions(reader, &report, on_event)?;
         Ok(Self {
             version: Self::VERSION,
             source: ScanImageSource {
@@ -740,6 +749,7 @@ struct LegacyScanArtifact {
 fn build_filesystem_sessions(
     reader: &ImageReader,
     report: &ScanReport,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<Vec<FilesystemSessionArtifact>> {
     let mut sessions = Vec::new();
     let mut next_node_id = 1u64;
@@ -825,6 +835,13 @@ fn build_filesystem_sessions(
         }];
         let mut warnings = Vec::new();
 
+        if let Some(cb) = on_event {
+            cb(crate::scan::ScanEvent::TreeBuildStarted {
+                filesystem_index,
+                label: fs_info.label.clone(),
+            });
+        }
+
         match ext4.list_directory(2) {
             Ok(root_entries) => {
                 let mut visited_dirs = HashSet::from([2u64]);
@@ -839,6 +856,7 @@ fn build_filesystem_sessions(
                     &mut nodes,
                     &mut warnings,
                     0,
+                    on_event,
                 ) {
                     tracing::warn!(
                         "failed to build full session tree for filesystem {} at offset {}: {}",
@@ -864,6 +882,13 @@ fn build_filesystem_sessions(
                     &format!("failed to read root directory: {}", err),
                 ));
             }
+        }
+
+        if let Some(cb) = on_event {
+            cb(crate::scan::ScanEvent::TreeBuildComplete {
+                filesystem_index,
+                total_nodes: nodes.len(),
+            });
         }
 
         if !nodes.is_empty() {
@@ -907,6 +932,7 @@ fn build_ext4_subtree(
     nodes: &mut Vec<SessionNode>,
     warnings: &mut Vec<String>,
     depth: usize,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
     if depth >= MAX_TREE_DEPTH {
         return Ok(());
@@ -959,6 +985,18 @@ fn build_ext4_subtree(
             timestamps,
         });
 
+        // Emit tree build progress every 500 nodes
+        if let Some(cb) = on_event {
+            if nodes.len() % 500 == 0 {
+                let dirs = nodes.iter().filter(|n| n.file_type == FileType::Directory).count();
+                cb(crate::scan::ScanEvent::TreeBuildProgress {
+                    filesystem_index,
+                    files_found: nodes.len() - dirs,
+                    dirs_found: dirs,
+                });
+            }
+        }
+
         if file_type == FileType::Directory && entry.inode > 0 && visited_dirs.insert(entry.inode) {
             match ext4.list_directory(entry.inode) {
                 Ok(children) => {
@@ -973,6 +1011,7 @@ fn build_ext4_subtree(
                         nodes,
                         warnings,
                         depth + 1,
+                        on_event,
                     )?;
                 }
                 Err(err) => warnings.push(format_traversal_warning(
@@ -1083,6 +1122,7 @@ fn append_ext4_deleted_orphans(
                         nodes,
                         warnings,
                         0,
+                        None,
                     ) {
                         tracing::warn!(
                             "failed to build deleted orphan subtree for inode {} in filesystem {}: {}",
