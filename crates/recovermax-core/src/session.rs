@@ -791,47 +791,25 @@ fn build_filesystem_sessions(
                 continue;
             }
         };
-        let root_inode = match ext4.read_inode(2) {
-            Ok(root_inode) => root_inode,
-            Err(err) => {
-                tracing::warn!(
-                    "failed to read root inode for filesystem {} at offset {}; saving report-only session: {}",
-                    filesystem_index,
-                    fs_info.offset,
-                    err
-                );
-                sessions.push(FilesystemSessionArtifact {
-                    filesystem_index,
-                    fs_info: fs_info.clone(),
-                    root_node_id: None,
-                    warnings: vec![format_traversal_warning(
-                        "/",
-                        &format!(
-                            "failed to read root inode at offset {}: {}",
-                            fs_info.offset, err
-                        ),
-                    )],
-                    nodes: Vec::new(),
-                });
-                continue;
-            }
-        };
         let root_id = next_node_id;
         next_node_id += 1;
 
+        // Try to read root inode — if corrupt (Proxmox overwrote block group 0),
+        // create a synthetic root and still proceed with deleted inode scanning
+        let root_inode_ok = ext4.read_inode(2).ok();
         let mut nodes = vec![SessionNode {
             id: root_id,
             parent_id: None,
             filesystem_index,
-            inode: Some(root_inode.number),
+            inode: root_inode_ok.as_ref().map(|i| i.number).or(Some(2)),
             basename: "/".to_string(),
             path: "/".to_string(),
             file_type: FileType::Directory,
-            deleted: root_inode.is_deleted(),
-            size: Some(root_inode.size),
+            deleted: root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
+            size: root_inode_ok.as_ref().map(|i| i.size),
             source: EntrySource::Filesystem,
             parent_inode: None,
-            timestamps: session_timestamps_from_inode(&root_inode),
+            timestamps: root_inode_ok.as_ref().and_then(session_timestamps_from_inode),
         }];
         let mut warnings = Vec::new();
 
@@ -842,46 +820,63 @@ fn build_filesystem_sessions(
             });
         }
 
-        match ext4.list_directory(2) {
-            Ok(root_entries) => {
-                let mut visited_dirs = HashSet::from([2u64]);
-                if let Err(err) = build_ext4_subtree(
-                    &ext4,
-                    filesystem_index,
-                    root_id,
-                    PathBuf::new(),
-                    &root_entries,
-                    &mut visited_dirs,
-                    &mut next_node_id,
-                    &mut nodes,
-                    &mut warnings,
-                    0,
-                    on_event,
-                ) {
+        if root_inode_ok.is_some() {
+            // Normal path: root inode is readable, walk the directory tree
+            match ext4.list_directory(2) {
+                Ok(root_entries) => {
+                    let mut visited_dirs = HashSet::from([2u64]);
+                    if let Err(err) = build_ext4_subtree(
+                        &ext4,
+                        filesystem_index,
+                        root_id,
+                        PathBuf::new(),
+                        &root_entries,
+                        &mut visited_dirs,
+                        &mut next_node_id,
+                        &mut nodes,
+                        &mut warnings,
+                        0,
+                        on_event,
+                    ) {
+                        tracing::warn!(
+                            "failed to build full session tree for filesystem {} at offset {}: {}",
+                            filesystem_index,
+                            fs_info.offset,
+                            err
+                        );
+                        warnings.push(format_traversal_warning(
+                            "/",
+                            &format!("failed to build full session tree: {}", err),
+                        ));
+                    }
+                }
+                Err(err) => {
                     tracing::warn!(
-                        "failed to build full session tree for filesystem {} at offset {}: {}",
+                        "failed to read root directory for filesystem {} at offset {}: {}",
                         filesystem_index,
                         fs_info.offset,
                         err
                     );
                     warnings.push(format_traversal_warning(
                         "/",
-                        &format!("failed to build full session tree: {}", err),
+                        &format!("failed to read root directory: {}", err),
                     ));
                 }
             }
-            Err(err) => {
-                tracing::warn!(
-                    "failed to read root directory for filesystem {} at offset {}; preserving root-only session: {}",
-                    filesystem_index,
-                    fs_info.offset,
-                    err
-                );
-                warnings.push(format_traversal_warning(
-                    "/",
-                    &format!("failed to read root directory: {}", err),
-                ));
-            }
+        } else {
+            // Root inode is corrupt (e.g., Proxmox overwrote block group 0).
+            // Still proceed — deleted inode scanning will find files in
+            // intact block groups deeper in the disk.
+            tracing::warn!(
+                "Root inode (inode 2) is unreadable for filesystem {} at offset {}. \
+                 Block group 0 may be overwritten. Scanning all block groups for recoverable files...",
+                filesystem_index,
+                fs_info.offset
+            );
+            warnings.push(format_traversal_warning(
+                "/",
+                "Root inode unreadable (block group 0 may be overwritten). Scanning all block groups for deleted/orphan files.",
+            ));
         }
 
         if let Some(cb) = on_event {
@@ -891,9 +886,13 @@ fn build_filesystem_sessions(
             });
         }
 
-        if !nodes.is_empty() {
-            let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
-            append_ext4_deleted_orphans(
+        let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
+
+        // When root is corrupt, scan ALL block groups for any readable inodes.
+        // This finds files in intact block groups deeper in the disk.
+        if root_inode_ok.is_none() {
+            tracing::info!("Scanning all block groups for recoverable inodes...");
+            append_ext4_all_inodes(
                 &ext4,
                 filesystem_index,
                 root_id,
@@ -901,8 +900,20 @@ fn build_filesystem_sessions(
                 &mut nodes,
                 &mut warnings,
                 &journal_hints,
+                on_event,
             );
         }
+
+        // Always scan for deleted/orphan inodes
+        append_ext4_deleted_orphans(
+            &ext4,
+            filesystem_index,
+            root_id,
+            &mut next_node_id,
+            &mut nodes,
+            &mut warnings,
+            &journal_hints,
+        );
 
         sessions.push(FilesystemSessionArtifact {
             filesystem_index,
@@ -1027,6 +1038,184 @@ fn build_ext4_subtree(
     }
 
     Ok(())
+}
+
+/// Scan ALL block groups for any readable inodes (live or deleted).
+/// Used when the root directory is corrupt (e.g., Proxmox overwrote block group 0).
+/// Builds a flat list under /$RecoveredFiles/ with journal-recovered names.
+#[allow(clippy::too_many_arguments)]
+fn append_ext4_all_inodes(
+    ext4: &Ext4Fs<'_>,
+    filesystem_index: usize,
+    root_id: u64,
+    next_node_id: &mut u64,
+    nodes: &mut Vec<SessionNode>,
+    warnings: &mut Vec<String>,
+    journal_hints: &std::collections::HashMap<u64, String>,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+) {
+    let inode_size = ext4.superblock.inode_size as usize;
+    let inodes_per_group = ext4.superblock.inodes_per_group;
+    let block_size = ext4.superblock.block_size() as usize;
+    let num_groups = (ext4.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+    let inodes_per_block = block_size / inode_size;
+
+    // Create a virtual directory for recovered files
+    let recovered_dir_id = *next_node_id;
+    *next_node_id += 1;
+    nodes.push(SessionNode {
+        id: recovered_dir_id,
+        parent_id: Some(root_id),
+        filesystem_index,
+        inode: None,
+        basename: "$RecoveredFiles".to_string(),
+        path: "/$RecoveredFiles".to_string(),
+        file_type: FileType::Directory,
+        deleted: false,
+        size: None,
+        source: EntrySource::SyntheticOrphan,
+        parent_inode: None,
+        timestamps: None,
+    });
+
+    let mut found_count = 0usize;
+    let mut referenced_inodes = HashSet::new();
+    referenced_inodes.insert(2u64); // root
+
+    for group in 0..num_groups {
+        let bg = match ext4.read_group_descriptor(group) {
+            Ok(bg) => bg,
+            Err(_) => continue,
+        };
+        if bg.inode_table == 0 || bg.inode_table >= ext4.superblock.blocks_count {
+            continue;
+        }
+
+        let inode_table_blocks =
+            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+
+        for tbl_block in 0..inode_table_blocks {
+            let abs_block = bg.inode_table + tbl_block as u64;
+            let block_data = match ext4.read_block(abs_block) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for slot in 0..inodes_per_block {
+                let local_index = tbl_block * inodes_per_block + slot;
+                if local_index >= inodes_per_group as usize {
+                    break;
+                }
+
+                let inode_num = group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
+                if inode_num <= 10 || referenced_inodes.contains(&inode_num) {
+                    continue;
+                }
+
+                let off = slot * inode_size;
+                if off + inode_size > block_data.len() {
+                    break;
+                }
+
+                let data = &block_data[off..off + inode_size];
+                let mode = u16::from_le_bytes([data[0], data[1]]);
+                let size_lo = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+                let links_count = u16::from_le_bytes([data[26], data[27]]);
+                let dtime = u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
+                let mtime = u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
+                let atime = u32::from_le_bytes(data[8..12].try_into().unwrap_or([0; 4]));
+                let ctime = u32::from_le_bytes(data[12..16].try_into().unwrap_or([0; 4]));
+                let size_hi = if data.len() >= 112 {
+                    u32::from_le_bytes(data[108..112].try_into().unwrap_or([0; 4]))
+                } else {
+                    0
+                };
+                let size = (size_hi as u64) << 32 | size_lo as u64;
+
+                // Skip empty/unused inodes
+                if mode == 0 || size == 0 {
+                    continue;
+                }
+
+                let is_deleted = dtime != 0 || links_count == 0;
+                let file_type = match mode & 0xF000 {
+                    0x4000 => FileType::Directory,
+                    0x8000 => FileType::RegularFile,
+                    0xA000 => FileType::Symlink,
+                    _ => continue,
+                };
+
+                let basename = journal_hints
+                    .get(&inode_num)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if is_deleted {
+                            format!("OrphanFile-{}", inode_num)
+                        } else {
+                            format!("File-{}", inode_num)
+                        }
+                    });
+                let path = format!("/$RecoveredFiles/{}", basename);
+
+                let node_id = *next_node_id;
+                *next_node_id += 1;
+                nodes.push(SessionNode {
+                    id: node_id,
+                    parent_id: Some(recovered_dir_id),
+                    filesystem_index,
+                    inode: Some(inode_num),
+                    basename,
+                    path,
+                    file_type,
+                    deleted: is_deleted,
+                    size: Some(size),
+                    source: if is_deleted {
+                        EntrySource::SyntheticOrphan
+                    } else {
+                        EntrySource::Filesystem
+                    },
+                    parent_inode: None,
+                    timestamps: Some(SessionNodeTimestamps {
+                        created_unix: nonzero_unix_timestamp(ctime),
+                        modified_unix: nonzero_unix_timestamp(mtime),
+                        accessed_unix: nonzero_unix_timestamp(atime),
+                        deleted_unix: nonzero_unix_timestamp(dtime),
+                    })
+                    .filter(|ts| {
+                        ts.created_unix.is_some()
+                            || ts.modified_unix.is_some()
+                            || ts.accessed_unix.is_some()
+                            || ts.deleted_unix.is_some()
+                    }),
+                });
+
+                referenced_inodes.insert(inode_num);
+                found_count += 1;
+
+                if let Some(cb) = on_event {
+                    if found_count % 500 == 0 {
+                        cb(crate::scan::ScanEvent::TreeBuildProgress {
+                            filesystem_index,
+                            files_found: found_count,
+                            dirs_found: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if found_count > 0 {
+        tracing::info!(
+            "Full inode scan found {} recoverable inodes across all block groups",
+            found_count
+        );
+    } else {
+        warnings.push(format_traversal_warning(
+            "/$RecoveredFiles",
+            "No recoverable inodes found in any block group",
+        ));
+    }
 }
 
 fn append_ext4_deleted_orphans(
