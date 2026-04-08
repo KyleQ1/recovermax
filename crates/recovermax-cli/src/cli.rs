@@ -1031,17 +1031,12 @@ fn run_scan(
     let scanner = Scanner::new(&reader);
     let report = scanner.full_scan_with_options(&options)?;
 
-    // Clear progress display
-    block_bar.finish_and_clear();
-    progress_bar.finish_and_clear();
-    stats_bar.finish_and_clear();
-
+    // Print summary (scan found filesystems)
     println!("\n{}", report.summary());
 
     if let Some(path) = output {
-        // Reuse the same display for tree building progress
+        // Keep progress bars alive for tree building phase
         let display_clone2 = Arc::clone(&display);
-        let block_bar2 = block_bar.clone();
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
 
@@ -1049,35 +1044,22 @@ fn run_scan(
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            block_bar2.set_message(state.render_block_map());
-
             match state.current_phase {
                 ScanPhase::TreeBuilding => {
                     progress_bar2.set_length(0);
-                    progress_bar2.set_position(state.bytes_scanned);
+                    progress_bar2.set_position(0);
                     progress_bar2.set_message(format!(
                         " | Building file tree: {} entries{}",
                         state.bytes_scanned,
                         state.speed_str(),
                     ));
-                }
-                _ => {
-                    progress_bar2.set_length(state.phase_total_bytes);
-                    progress_bar2.set_position(state.bytes_scanned);
-                    progress_bar2.set_message(format!(
-                        " | {}{}{}",
-                        state.phase_name(),
-                        state.speed_str(),
-                        state.eta_str(),
+                    stats_bar2.set_message(format!(
+                        "Filesystems: {}",
+                        state.fs_summary(),
                     ));
                 }
+                _ => {}
             }
-
-            stats_bar2.set_message(format!(
-                "Filesystems: {} | File signatures: {}",
-                state.fs_summary(),
-                state.file_types_found,
-            ));
         };
 
         let artifact = RecoverySessionArtifact::from_scan_with_callback(
@@ -1087,13 +1069,14 @@ fn run_scan(
             Some(&tree_callback),
         )?;
 
-        block_bar.finish_and_clear();
-        progress_bar.finish_and_clear();
-        stats_bar.finish_and_clear();
-
         artifact.save_to_path(&path)?;
         println!("Session saved to {}", path.display());
     }
+
+    // Clear progress display at the very end
+    block_bar.finish_and_clear();
+    progress_bar.finish_and_clear();
+    stats_bar.finish_and_clear();
 
     Ok(())
 }
