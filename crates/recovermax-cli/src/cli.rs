@@ -145,6 +145,10 @@ pub enum Command {
         #[arg(short, long)]
         path: Option<String>,
 
+        /// Limit recovery target resolution to one filesystem index
+        #[arg(long)]
+        fs: Option<usize>,
+
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
@@ -278,8 +282,12 @@ pub fn run(args: Args) -> Result<()> {
             long,
             memory_budget,
         } => {
-            let mut session =
-                open_session(&image, scan_file.as_deref(), memory_budget.as_deref(), false)?;
+            let mut session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
             let node = resolve_node_for_session(&mut session, fs, &path)?;
             if node.file_type != FileType::Directory {
                 print_stat_node(&node, session.artifact());
@@ -287,7 +295,8 @@ pub fn run(args: Args) -> Result<()> {
                 return Ok(());
             }
 
-            let children = list_children_with_fallback(&mut session, node.filesystem_index, &node.path)?;
+            let children =
+                list_children_with_fallback(&mut session, node.filesystem_index, &node.path)?;
             print_directory_listing(&children, long);
             Ok(())
         }
@@ -299,10 +308,15 @@ pub fn run(args: Args) -> Result<()> {
             depth,
             memory_budget,
         } => {
-            let mut session =
-                open_session(&image, scan_file.as_deref(), memory_budget.as_deref(), false)?;
+            let mut session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
             let node = resolve_node_for_session(&mut session, fs, &path)?;
-            let entries = walk_tree_with_fallback(&mut session, node.filesystem_index, &node.path, depth)?;
+            let entries =
+                walk_tree_with_fallback(&mut session, node.filesystem_index, &node.path, depth)?;
             print_tree_entries(&entries, depth);
             Ok(())
         }
@@ -313,8 +327,12 @@ pub fn run(args: Args) -> Result<()> {
             fs,
             memory_budget,
         } => {
-            let mut session =
-                open_session(&image, scan_file.as_deref(), memory_budget.as_deref(), false)?;
+            let mut session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
             let node = resolve_node_for_session(&mut session, fs, &target)?;
             print_stat_node(&node, session.artifact());
             print_deleted_recovery_hint(&session, &node);
@@ -325,15 +343,26 @@ pub fn run(args: Args) -> Result<()> {
             dest,
             scan_file,
             path,
+            fs,
             memory_budget,
         } => {
-            let mut session =
-                open_session(&image, scan_file.as_deref(), memory_budget.as_deref(), false)?;
+            let mut session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
+            let requested_path = path.as_deref().map(normalize_session_path);
             let recovery_target = match path.as_deref() {
-                Some(selector) => Some(resolve_recovery_target(&mut session, selector)?),
+                Some(selector) => Some(resolve_recovery_target(&mut session, fs, selector)?),
                 None => None,
             };
-            recover_with_fallback(&mut session, &dest, recovery_target.as_ref())?;
+            recover_with_fallback(
+                &mut session,
+                &dest,
+                recovery_target.as_ref(),
+                requested_path.as_deref(),
+            )?;
             Ok(())
         }
         Command::Search {
@@ -345,8 +374,12 @@ pub fn run(args: Args) -> Result<()> {
             exact,
             memory_budget,
         } => {
-            let mut session =
-                open_session(&image, scan_file.as_deref(), memory_budget.as_deref(), false)?;
+            let mut session = open_session(
+                &image,
+                scan_file.as_deref(),
+                memory_budget.as_deref(),
+                false,
+            )?;
             let options = SearchOptions {
                 ignore_case,
                 exact,
@@ -464,9 +497,7 @@ pub fn run(args: Args) -> Result<()> {
                     println!(
                         "\nDirect inode recovery: recovermax deleted <image> -r <inode> -d <dest>"
                     );
-                    println!(
-                        "Session path convention: /$OrphanFiles/OrphanFile-<inode>"
-                    );
+                    println!("Session path convention: /$OrphanFiles/OrphanFile-<inode>");
                     Ok(())
                 }
             }
@@ -705,8 +736,12 @@ fn resolve_node_for_session(
     }
 }
 
-fn resolve_recovery_target(session: &mut RecoverySession, selector: &str) -> Result<SessionNode> {
-    let node = resolve_node_for_session(session, None, selector)?;
+fn resolve_recovery_target(
+    session: &mut RecoverySession,
+    filesystem_index: Option<usize>,
+    selector: &str,
+) -> Result<SessionNode> {
+    let node = resolve_node_for_session(session, filesystem_index, selector)?;
     if is_residual_deleted_entry(&node) {
         if let Some(candidate) = unique_orphan_recovery_candidate(session, &node) {
             return Ok(candidate);
@@ -814,10 +849,12 @@ fn candidate_sort_key(left: &SessionNode, right: &SessionNode) -> std::cmp::Orde
             left.timestamps
                 .as_ref()
                 .and_then(|timestamps| timestamps.modified_unix)
-                .cmp(&right
-                    .timestamps
-                    .as_ref()
-                    .and_then(|timestamps| timestamps.modified_unix))
+                .cmp(
+                    &right
+                        .timestamps
+                        .as_ref()
+                        .and_then(|timestamps| timestamps.modified_unix),
+                )
         })
         .then_with(|| left.path.cmp(&right.path))
 }
@@ -924,8 +961,12 @@ pub(crate) fn search_with_fallback(
         .attached_reader()
         .ok_or_else(|| anyhow!("session has no attached image reader"))?;
     let searcher = Searcher::new(reader);
-    let mut live_matches =
-        searcher.search_selected(session.artifact().report(), query, options, &live_filesystems)?;
+    let mut live_matches = searcher.search_selected(
+        session.artifact().report(),
+        query,
+        options,
+        &live_filesystems,
+    )?;
     matches.append(&mut live_matches);
     matches.sort_by(|a, b| {
         a.filesystem_index
@@ -1006,9 +1047,9 @@ fn live_resolve_node(
                 );
             }
 
-            let current_inode = current
-                .inode
-                .ok_or_else(|| anyhow!("directory {} has no inode in live fallback", current.path))?;
+            let current_inode = current.inode.ok_or_else(|| {
+                anyhow!("directory {} has no inode in live fallback", current.path)
+            })?;
             let entries = ext4.list_directory(current_inode)?;
             let entry = entries
                 .iter()
@@ -1148,7 +1189,14 @@ fn live_walk_tree_recursive(
         let mut children = live_deleted_orphan_nodes(ext4, filesystem_index, Some(node.id));
         children.sort_by(|a, b| a.basename.cmp(&b.basename));
         for child in children {
-            live_walk_tree_recursive(ext4, filesystem_index, child, current_depth + 1, max_depth, out)?;
+            live_walk_tree_recursive(
+                ext4,
+                filesystem_index,
+                child,
+                current_depth + 1,
+                max_depth,
+                out,
+            )?;
         }
         return Ok(());
     }
@@ -1185,7 +1233,14 @@ fn live_walk_tree_recursive(
 
     children.sort_by(|a, b| a.basename.cmp(&b.basename));
     for child in children {
-        live_walk_tree_recursive(ext4, filesystem_index, child, current_depth + 1, max_depth, out)?;
+        live_walk_tree_recursive(
+            ext4,
+            filesystem_index,
+            child,
+            current_depth + 1,
+            max_depth,
+            out,
+        )?;
     }
 
     Ok(())
@@ -1231,9 +1286,13 @@ fn live_find_deleted_orphan_node(
     filesystem_index: usize,
     path: &str,
 ) -> Option<SessionNode> {
-    live_deleted_orphan_nodes(ext4, filesystem_index, Some(synthetic_orphan_dir_id(filesystem_index)))
-        .into_iter()
-        .find(|node| node.path == path)
+    live_deleted_orphan_nodes(
+        ext4,
+        filesystem_index,
+        Some(synthetic_orphan_dir_id(filesystem_index)),
+    )
+    .into_iter()
+    .find(|node| node.path == path)
 }
 
 fn live_deleted_orphan_nodes(
@@ -1361,28 +1420,46 @@ fn recover_with_fallback(
     session: &mut RecoverySession,
     dest: &Path,
     target: Option<&SessionNode>,
+    requested_path: Option<&str>,
 ) -> Result<()> {
     let artifact = session.artifact().clone();
     let reader = session
         .attached_reader()
         .ok_or_else(|| anyhow!("session has no attached image reader"))?;
     let recoverer = recover::Recoverer::new(reader, dest);
+    let requested_path = target
+        .zip(requested_path)
+        .map(|(node, requested)| normalize_requested_recovery_path(&node.path, requested));
 
     if let Some(node) = target {
         let filesystem = artifact
             .filesystem_session(node.filesystem_index)
-            .with_context(|| format!("filesystem {} not found in session", node.filesystem_index))?;
+            .with_context(|| {
+                format!("filesystem {} not found in session", node.filesystem_index)
+            })?;
         let ext4 = Ext4Fs::new(reader, filesystem.fs_info.offset)?;
         if node.file_type == FileType::Directory {
             if node.inode.is_some() {
-                return recoverer.recover_session_subtree(&ext4, node);
+                recoverer
+                    .recover_session_subtree_to_path(&ext4, node, requested_path.as_deref())?;
+                return Ok(());
             }
         } else {
-            return recoverer.recover_session_node(&ext4, node);
+            recoverer.recover_session_node_to_path(&ext4, node, requested_path.as_deref())?;
+            return Ok(());
         }
     }
 
     recoverer.recover_artifact(&artifact, target.map(|node| node.path.as_str()))
+}
+
+fn normalize_requested_recovery_path(resolved_path: &str, requested_path: &str) -> String {
+    let normalized = normalize_session_path(requested_path);
+    if normalized == resolved_path {
+        resolved_path.to_string()
+    } else {
+        normalized
+    }
 }
 
 fn warm_session_caches(session: &mut RecoverySession) -> Result<()> {
@@ -1849,8 +1926,7 @@ mod tests {
             block_count: u16,
         ) {
             let index = (inode_num - 1) % self.inodes_per_group as u64;
-            let off = self.inode_table_block * self.block_size
-                + index as usize * self.inode_size;
+            let off = self.inode_table_block * self.block_size + index as usize * self.inode_size;
 
             self.write_u16(off, mode);
             self.write_u32(off + 4, size as u32);
@@ -1915,10 +1991,7 @@ mod tests {
 
         builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
         builder.write_inode_with_extent(11, 0x8000 | 0o644, 13, 20, 1);
-        builder.write_dir_entries(
-            10,
-            &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")],
-        );
+        builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")]);
         builder.write_data(20, b"Hello, world!");
 
         let bytes = builder.build();
@@ -1935,10 +2008,7 @@ mod tests {
         builder.write_inode_with_extent(11, 0x8000 | 0o644, 13, 20, 1);
         builder.write_inode_with_extent(13, 0x8000 | 0o644, 8, 30, 1);
 
-        builder.write_dir_entries(
-            10,
-            &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")],
-        );
+        builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")]);
         builder.write_data(20, b"Hello, world!");
         builder.write_data(30, b"orphaned");
 
@@ -1964,10 +2034,7 @@ mod tests {
         builder.write_inode_with_extent(13, 0x4000 | 0o755, 4096, 30, 1);
         builder.write_inode_with_extent(14, 0x8000 | 0o644, 6, 40, 1);
 
-        builder.write_dir_entries(
-            10,
-            &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")],
-        );
+        builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (11, 1, "hello.txt")]);
         builder.write_data(20, b"Hello, world!");
         builder.write_dir_entries(30, &[(13, 2, "."), (2, 2, ".."), (14, 1, "hidden.txt")]);
         builder.write_data(40, b"secret");
@@ -2019,7 +2086,7 @@ mod tests {
 
         let dest = unique_path("cli-fallback-out", "");
         fs::create_dir_all(&dest).unwrap();
-        recover_with_fallback(&mut session, &dest, None).unwrap();
+        recover_with_fallback(&mut session, &dest, None, None).unwrap();
 
         let recovered = fs::read(dest.join("hello.txt")).unwrap();
         assert_eq!(recovered, b"Hello, world!");
@@ -2032,13 +2099,16 @@ mod tests {
 
         let root_children = list_children_with_fallback(&mut session, 0, "/").unwrap();
         assert!(root_children.iter().any(|node| node.path == "/hello.txt"));
-        assert!(root_children.iter().any(|node| node.path == "/$OrphanFiles"));
+        assert!(root_children
+            .iter()
+            .any(|node| node.path == "/$OrphanFiles"));
 
         let orphan_dir = resolve_node_with_fallback(&mut session, 0, "/$OrphanFiles").unwrap();
         assert_eq!(orphan_dir.file_type, FileType::Directory);
         assert!(orphan_dir.inode.is_none());
 
-        let orphan = resolve_recovery_target(&mut session, "/$OrphanFiles/OrphanFile-13").unwrap();
+        let orphan =
+            resolve_recovery_target(&mut session, None, "/$OrphanFiles/OrphanFile-13").unwrap();
         assert_eq!(orphan.inode, Some(13));
         assert!(orphan.deleted);
         assert_eq!(
@@ -2064,7 +2134,7 @@ mod tests {
 
         let dest = unique_path("cli-fallback-orphan-out", "");
         fs::create_dir_all(&dest).unwrap();
-        recover_with_fallback(&mut session, &dest, Some(&orphan)).unwrap();
+        recover_with_fallback(&mut session, &dest, Some(&orphan), None).unwrap();
 
         let recovered = fs::read(dest.join("$OrphanFiles/OrphanFile-13")).unwrap();
         assert_eq!(recovered, b"orphaned");
@@ -2075,21 +2145,20 @@ mod tests {
         let (image_path, _) = build_report_only_orphan_directory_fixture();
         let mut session = report_only_session(&image_path);
 
-        let orphan_dir = resolve_node_with_fallback(&mut session, 0, "/$OrphanFiles/OrphanFile-13").unwrap();
+        let orphan_dir =
+            resolve_node_with_fallback(&mut session, 0, "/$OrphanFiles/OrphanFile-13").unwrap();
         assert_eq!(orphan_dir.file_type, FileType::Directory);
         assert_eq!(orphan_dir.inode, Some(13));
         assert!(orphan_dir.deleted);
 
-        let children = list_children_with_fallback(&mut session, 0, "/$OrphanFiles/OrphanFile-13").unwrap();
+        let children =
+            list_children_with_fallback(&mut session, 0, "/$OrphanFiles/OrphanFile-13").unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].path, "/$OrphanFiles/OrphanFile-13/hidden.txt");
 
-        let hidden = resolve_node_with_fallback(
-            &mut session,
-            0,
-            "/$OrphanFiles/OrphanFile-13/hidden.txt",
-        )
-        .unwrap();
+        let hidden =
+            resolve_node_with_fallback(&mut session, 0, "/$OrphanFiles/OrphanFile-13/hidden.txt")
+                .unwrap();
         assert_eq!(hidden.inode, Some(14));
         assert_eq!(hidden.file_type, FileType::RegularFile);
 
@@ -2108,7 +2177,7 @@ mod tests {
 
         let dest = unique_path("cli-fallback-orphan-dir-out", "");
         fs::create_dir_all(&dest).unwrap();
-        recover_with_fallback(&mut session, &dest, Some(&orphan_dir)).unwrap();
+        recover_with_fallback(&mut session, &dest, Some(&orphan_dir), None).unwrap();
 
         let recovered = fs::read(dest.join("$OrphanFiles/OrphanFile-13/hidden.txt")).unwrap();
         assert_eq!(recovered, b"secret");
@@ -2212,9 +2281,127 @@ mod tests {
         };
 
         let mut session = RecoverySession::from_artifact(artifact, None);
-        let resolved = resolve_recovery_target(&mut session, "/ghost.txt").unwrap();
+        let resolved = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap();
         assert_eq!(resolved.path, "/$OrphanFiles/OrphanFile-99");
         assert_eq!(resolved.inode, Some(99));
+    }
+
+    #[test]
+    fn auto_resolved_deleted_recovery_uses_requested_output_path() {
+        let (image_path, _) = build_report_only_orphan_fixture();
+        let reader = ImageReader::open(&image_path).unwrap();
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: image_path.clone(),
+                image_size: reader.len(),
+            },
+            report: ScanReport {
+                image_size: reader.len(),
+                partitions: vec![Partition {
+                    name: "p1".to_string(),
+                    offset: 0,
+                    size: reader.len(),
+                    fs_type: "Linux".to_string(),
+                }],
+                filesystems: vec![FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: reader.len(),
+                    offset: 0,
+                }],
+            },
+            filesystems: vec![FilesystemSessionArtifact {
+                filesystem_index: 0,
+                fs_info: FsInfo {
+                    fs_type: "ext4".to_string(),
+                    label: "synthetic".to_string(),
+                    uuid: "99999999-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+                    block_size: 4096,
+                    total_size: reader.len(),
+                    offset: 0,
+                },
+                root_node_id: Some(1),
+                nodes: vec![
+                    SessionNode {
+                        id: 1,
+                        parent_id: None,
+                        filesystem_index: 0,
+                        inode: Some(2),
+                        basename: "/".to_string(),
+                        path: "/".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: Some(4096),
+                        source: EntrySource::Filesystem,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 2,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "ghost.txt".to_string(),
+                        path: "/ghost.txt".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: None,
+                        source: EntrySource::DeletedSlack,
+                        parent_inode: Some(2),
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 3,
+                        parent_id: Some(1),
+                        filesystem_index: 0,
+                        inode: None,
+                        basename: "$OrphanFiles".to_string(),
+                        path: "/$OrphanFiles".to_string(),
+                        file_type: FileType::Directory,
+                        deleted: false,
+                        size: None,
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: None,
+                    },
+                    SessionNode {
+                        id: 4,
+                        parent_id: Some(3),
+                        filesystem_index: 0,
+                        inode: Some(13),
+                        basename: "OrphanFile-13".to_string(),
+                        path: "/$OrphanFiles/OrphanFile-13".to_string(),
+                        file_type: FileType::RegularFile,
+                        deleted: true,
+                        size: Some(8),
+                        source: EntrySource::SyntheticOrphan,
+                        parent_inode: None,
+                        timestamps: Some(SessionNodeTimestamps {
+                            created_unix: Some(1_700_000_001),
+                            modified_unix: Some(1_700_000_003),
+                            accessed_unix: Some(1_700_000_002),
+                            deleted_unix: Some(1_234_567_890),
+                        }),
+                    },
+                ],
+            }],
+        };
+
+        let mut session = RecoverySession::from_artifact_with_reader(artifact, reader, None);
+        let resolved = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap();
+        assert_eq!(resolved.path, "/$OrphanFiles/OrphanFile-13");
+
+        let dest = unique_path("cli-fallback-residual-out", "");
+        fs::create_dir_all(&dest).unwrap();
+        recover_with_fallback(&mut session, &dest, Some(&resolved), Some("/ghost.txt")).unwrap();
+
+        let recovered = fs::read(dest.join("ghost.txt")).unwrap();
+        assert_eq!(recovered, b"orphaned");
+        assert!(!dest.join("$OrphanFiles/OrphanFile-13").exists());
+        assert!(!dest.join("$OrphanFiles").exists());
     }
 
     #[test]
@@ -2426,7 +2613,7 @@ mod tests {
         };
 
         let mut session = RecoverySession::from_artifact(artifact, None);
-        let resolved = resolve_recovery_target(&mut session, "/ghost.txt").unwrap();
+        let resolved = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap();
         assert_eq!(resolved.path, "/$OrphanFiles/OrphanFile-99");
         assert_eq!(resolved.inode, Some(99));
     }
@@ -2553,7 +2740,7 @@ mod tests {
         };
 
         let mut session = RecoverySession::from_artifact(artifact, None);
-        let err = resolve_recovery_target(&mut session, "/ghost.txt").unwrap_err();
+        let err = resolve_recovery_target(&mut session, None, "/ghost.txt").unwrap_err();
         let message = err.to_string();
         assert!(message.contains("Possible orphan candidates:"));
         assert!(message.contains(
@@ -2581,6 +2768,253 @@ mod tests {
         assert!(row.contains("1700000042"));
         assert!(row.contains("file"));
         assert!(row.contains("/$OrphanFiles/OrphanFile-42"));
+    }
+
+    #[test]
+    fn recover_target_resolution_requires_fs_when_path_exists_in_multiple_filesystems() {
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 8192,
+            },
+            report: ScanReport {
+                image_size: 8192,
+                partitions: vec![],
+                filesystems: vec![
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                ],
+            },
+            filesystems: vec![
+                FilesystemSessionArtifact {
+                    filesystem_index: 0,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    root_node_id: Some(1),
+                    nodes: vec![
+                        SessionNode {
+                            id: 1,
+                            parent_id: None,
+                            filesystem_index: 0,
+                            inode: Some(2),
+                            basename: "/".to_string(),
+                            path: "/".to_string(),
+                            file_type: FileType::Directory,
+                            deleted: false,
+                            size: Some(4096),
+                            source: EntrySource::Filesystem,
+                            parent_inode: None,
+                            timestamps: None,
+                        },
+                        SessionNode {
+                            id: 2,
+                            parent_id: Some(1),
+                            filesystem_index: 0,
+                            inode: Some(10),
+                            basename: "shared.txt".to_string(),
+                            path: "/shared.txt".to_string(),
+                            file_type: FileType::RegularFile,
+                            deleted: false,
+                            size: Some(3),
+                            source: EntrySource::Filesystem,
+                            parent_inode: Some(2),
+                            timestamps: None,
+                        },
+                    ],
+                },
+                FilesystemSessionArtifact {
+                    filesystem_index: 1,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                    root_node_id: Some(3),
+                    nodes: vec![
+                        SessionNode {
+                            id: 3,
+                            parent_id: None,
+                            filesystem_index: 1,
+                            inode: Some(2),
+                            basename: "/".to_string(),
+                            path: "/".to_string(),
+                            file_type: FileType::Directory,
+                            deleted: false,
+                            size: Some(4096),
+                            source: EntrySource::Filesystem,
+                            parent_inode: None,
+                            timestamps: None,
+                        },
+                        SessionNode {
+                            id: 4,
+                            parent_id: Some(3),
+                            filesystem_index: 1,
+                            inode: Some(20),
+                            basename: "shared.txt".to_string(),
+                            path: "/shared.txt".to_string(),
+                            file_type: FileType::RegularFile,
+                            deleted: false,
+                            size: Some(5),
+                            source: EntrySource::Filesystem,
+                            parent_inode: Some(2),
+                            timestamps: None,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let mut session = RecoverySession::from_artifact(artifact, None);
+        let err = resolve_recovery_target(&mut session, None, "/shared.txt").unwrap_err();
+        assert!(err.to_string().contains("specify --fs"));
+    }
+
+    #[test]
+    fn recover_target_resolution_accepts_explicit_filesystem_index() {
+        let artifact = RecoverySessionArtifact {
+            version: RecoverySessionArtifact::VERSION,
+            source: ScanImageSource {
+                path: PathBuf::from("/tmp/fake.img"),
+                image_size: 8192,
+            },
+            report: ScanReport {
+                image_size: 8192,
+                partitions: vec![],
+                filesystems: vec![
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                ],
+            },
+            filesystems: vec![
+                FilesystemSessionArtifact {
+                    filesystem_index: 0,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-a".to_string(),
+                        uuid: "a".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 0,
+                    },
+                    root_node_id: Some(1),
+                    nodes: vec![
+                        SessionNode {
+                            id: 1,
+                            parent_id: None,
+                            filesystem_index: 0,
+                            inode: Some(2),
+                            basename: "/".to_string(),
+                            path: "/".to_string(),
+                            file_type: FileType::Directory,
+                            deleted: false,
+                            size: Some(4096),
+                            source: EntrySource::Filesystem,
+                            parent_inode: None,
+                            timestamps: None,
+                        },
+                        SessionNode {
+                            id: 2,
+                            parent_id: Some(1),
+                            filesystem_index: 0,
+                            inode: Some(10),
+                            basename: "shared.txt".to_string(),
+                            path: "/shared.txt".to_string(),
+                            file_type: FileType::RegularFile,
+                            deleted: false,
+                            size: Some(3),
+                            source: EntrySource::Filesystem,
+                            parent_inode: Some(2),
+                            timestamps: None,
+                        },
+                    ],
+                },
+                FilesystemSessionArtifact {
+                    filesystem_index: 1,
+                    fs_info: FsInfo {
+                        fs_type: "ext4".to_string(),
+                        label: "ext-b".to_string(),
+                        uuid: "b".to_string(),
+                        block_size: 4096,
+                        total_size: 4096,
+                        offset: 4096,
+                    },
+                    root_node_id: Some(3),
+                    nodes: vec![
+                        SessionNode {
+                            id: 3,
+                            parent_id: None,
+                            filesystem_index: 1,
+                            inode: Some(2),
+                            basename: "/".to_string(),
+                            path: "/".to_string(),
+                            file_type: FileType::Directory,
+                            deleted: false,
+                            size: Some(4096),
+                            source: EntrySource::Filesystem,
+                            parent_inode: None,
+                            timestamps: None,
+                        },
+                        SessionNode {
+                            id: 4,
+                            parent_id: Some(3),
+                            filesystem_index: 1,
+                            inode: Some(20),
+                            basename: "shared.txt".to_string(),
+                            path: "/shared.txt".to_string(),
+                            file_type: FileType::RegularFile,
+                            deleted: false,
+                            size: Some(5),
+                            source: EntrySource::Filesystem,
+                            parent_inode: Some(2),
+                            timestamps: None,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let mut session = RecoverySession::from_artifact(artifact, None);
+        let resolved = resolve_recovery_target(&mut session, Some(1), "/shared.txt").unwrap();
+        assert_eq!(resolved.filesystem_index, 1);
+        assert_eq!(resolved.inode, Some(20));
     }
 
     #[test]

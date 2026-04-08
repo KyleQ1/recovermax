@@ -107,7 +107,8 @@ impl<'a> Searcher<'a> {
             )?;
             let mut orphan_dirs_visited = HashSet::new();
             let mut deleted_inodes = ext4.scan_deleted_inodes()?;
-            deleted_inodes.sort_by_key(|inode| (inode.file_type != FileType::Directory, inode.inode_num));
+            deleted_inodes
+                .sort_by_key(|inode| (inode.file_type != FileType::Directory, inode.inode_num));
             for deleted_inode in deleted_inodes {
                 let orphan_basename = format!("OrphanFile-{}", deleted_inode.inode_num);
                 let orphan_path = format!("/$OrphanFiles/{}", orphan_basename);

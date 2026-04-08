@@ -29,7 +29,7 @@
   - ext2 orphan recovery still resolves through `/$OrphanFiles/OrphanFile-13`
 - Deleted-path recovery behavior is now explicit instead of ambiguous:
   - `stat /Bellatrix.txt --fs 0` reports the residual as deleted-slack and includes `Recovery hint: Try /$OrphanFiles/OrphanFile-13 instead.`
-  - `recover -p /Bellatrix.txt --fs 0` now auto-resolves the unique orphan candidate and produces the same 712-byte output as `/$OrphanFiles/OrphanFile-13`.
+  - `recover -p /Bellatrix.txt --fs 0` now auto-resolves the unique orphan candidate, writes `Bellatrix.txt` directly, and produces the same 712-byte output as `/$OrphanFiles/OrphanFile-13`.
   - ext2 exposes `/$OrphanFiles/OrphanFile-13 [deleted]`, and recovering that path produces a 712-byte file locally.
   - `/Bunda.txt` and `/Botein.txt` resolve to deleted inodes, but Sleuth Kit also reports those inodes as size 0, so zero-byte recovery output is expected on this corpus.
 

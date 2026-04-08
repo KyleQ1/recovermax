@@ -190,7 +190,11 @@ impl<'a> Recoverer<'a> {
                 std::fs::create_dir_all(&dest_path)?;
             }
             FileType::Other => {
-                anyhow::bail!("node {} has unsupported type {:?}", node.path, node.file_type);
+                anyhow::bail!(
+                    "node {} has unsupported type {:?}",
+                    node.path,
+                    node.file_type
+                );
             }
         }
 

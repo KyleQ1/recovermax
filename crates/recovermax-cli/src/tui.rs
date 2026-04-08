@@ -2,11 +2,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
 use crate::cli::{
     deleted_recovery_hint_message, filesystem_has_tree, list_children_with_fallback,
     resolve_node_with_fallback, search_with_fallback, walk_tree_with_fallback,
 };
+use anyhow::{anyhow, Context, Result};
 use recovermax_core::fs::EntrySource;
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::Scanner;
@@ -141,7 +141,11 @@ pub fn run_tui(image_path: &Path, scan_file: Option<&Path>) -> Result<()> {
     let reader = ImageReader::open(image_path)?;
     let artifact = if let Some(scan_file) = scan_file {
         let artifact = RecoverySessionArtifact::load_from_path(scan_file)?;
-        artifact.validate_for_image_with_artifact_path(image_path, reader.len(), Some(scan_file))?;
+        artifact.validate_for_image_with_artifact_path(
+            image_path,
+            reader.len(),
+            Some(scan_file),
+        )?;
         artifact
     } else {
         let scanner = Scanner::new(&reader);
@@ -776,8 +780,14 @@ mod tests {
     #[test]
     fn entry_source_label_matches_cli_terms() {
         assert_eq!(entry_source_label(EntrySource::Filesystem), "filesystem");
-        assert_eq!(entry_source_label(EntrySource::DeletedSlack), "deleted-slack");
-        assert_eq!(entry_source_label(EntrySource::SyntheticOrphan), "synthetic-orphan");
+        assert_eq!(
+            entry_source_label(EntrySource::DeletedSlack),
+            "deleted-slack"
+        );
+        assert_eq!(
+            entry_source_label(EntrySource::SyntheticOrphan),
+            "synthetic-orphan"
+        );
     }
 
     #[test]

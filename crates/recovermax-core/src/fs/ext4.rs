@@ -902,9 +902,9 @@ fn directory_entry_file_type(file_type_byte: u8) -> FileType {
 
 fn directory_name_looks_plausible_live(name: &[u8]) -> bool {
     !name.is_empty()
-        && name.iter().all(|byte| {
-            !byte.is_ascii_control() && *byte != 0 && *byte != b'/' && *byte != b'\\'
-        })
+        && name
+            .iter()
+            .all(|byte| !byte.is_ascii_control() && *byte != 0 && *byte != b'/' && *byte != b'\\')
 }
 
 fn directory_name_looks_plausible_deleted(name: &[u8]) -> bool {

@@ -701,7 +701,9 @@ fn recovery_with_saved_session_artifact() {
 
     let dest = tempfile::TempDir::new().unwrap();
     let recoverer = recovermax_core::recover::Recoverer::new(&reader, dest.path());
-    recoverer.recover_artifact(&artifact, Some("/saved.txt")).unwrap();
+    recoverer
+        .recover_artifact(&artifact, Some("/saved.txt"))
+        .unwrap();
 
     let recovered_path = dest.path().join("saved.txt");
     assert!(recovered_path.exists(), "saved.txt should be recovered");
@@ -835,7 +837,10 @@ fn deleted_entries_in_directory_slack_are_preserved() {
     let fs = Ext4Fs::new(&reader, 0).unwrap();
 
     let entries = fs.list_directory(2).unwrap();
-    let deleted = entries.iter().find(|entry| entry.name == "ghost.bin").unwrap();
+    let deleted = entries
+        .iter()
+        .find(|entry| entry.name == "ghost.bin")
+        .unwrap();
     assert!(deleted.deleted);
     assert_eq!(deleted.inode, 13);
     assert_eq!(deleted.file_type, FileType::RegularFile);
@@ -848,10 +853,7 @@ fn deleted_entries_in_directory_slack_are_preserved() {
     let matches = searcher
         .search(&report, "ghost", &SearchOptions::default())
         .unwrap();
-    let ghost_match = matches
-        .iter()
-        .find(|m| m.path == "/ghost.bin")
-        .unwrap();
+    let ghost_match = matches.iter().find(|m| m.path == "/ghost.bin").unwrap();
     assert!(ghost_match.deleted);
     assert_eq!(ghost_match.inode, 13);
     assert_eq!(ghost_match.source, EntrySource::DeletedSlack);
@@ -941,7 +943,9 @@ fn deleted_directory_children_are_searchable_and_recoverable() {
     assert!(artifact.filesystems[0]
         .nodes
         .iter()
-        .any(|node| node.path == "/trash" && node.deleted && node.file_type == FileType::Directory));
+        .any(|node| node.path == "/trash"
+            && node.deleted
+            && node.file_type == FileType::Directory));
     assert!(artifact.filesystems[0]
         .nodes
         .iter()
@@ -1044,7 +1048,8 @@ fn deleted_orphan_directory_gets_browsable_subtree_and_recovers() {
     assert!(artifact.filesystems[0]
         .nodes
         .iter()
-        .any(|node| node.path == "/$OrphanFiles/OrphanFile-13" && node.file_type == FileType::Directory));
+        .any(|node| node.path == "/$OrphanFiles/OrphanFile-13"
+            && node.file_type == FileType::Directory));
     assert!(artifact.filesystems[0]
         .nodes
         .iter()
@@ -1056,7 +1061,8 @@ fn deleted_orphan_directory_gets_browsable_subtree_and_recovers() {
         .recover_artifact(&artifact, Some("/$OrphanFiles/OrphanFile-13"))
         .unwrap();
 
-    let recovered = std::fs::read(dest.path().join("$OrphanFiles/OrphanFile-13/hidden.txt")).unwrap();
+    let recovered =
+        std::fs::read(dest.path().join("$OrphanFiles/OrphanFile-13/hidden.txt")).unwrap();
     assert_eq!(recovered, b"secret");
 }
 

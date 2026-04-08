@@ -840,7 +840,11 @@ fn build_filesystem_sessions(
         sessions.push(FilesystemSessionArtifact {
             filesystem_index,
             fs_info: fs_info.clone(),
-            root_node_id: if nodes.is_empty() { None } else { Some(root_id) },
+            root_node_id: if nodes.is_empty() {
+                None
+            } else {
+                Some(root_id)
+            },
             nodes,
         });
     }
@@ -911,10 +915,7 @@ fn build_ext4_subtree(
             timestamps,
         });
 
-        if file_type == FileType::Directory
-            && entry.inode > 0
-            && visited_dirs.insert(entry.inode)
-        {
+        if file_type == FileType::Directory && entry.inode > 0 && visited_dirs.insert(entry.inode) {
             if let Ok(children) = ext4.list_directory(entry.inode) {
                 build_ext4_subtree(
                     ext4,
