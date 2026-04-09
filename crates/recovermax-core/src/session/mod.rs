@@ -917,16 +917,8 @@ fn build_filesystem_sessions(
             );
         }
 
-        // Always scan for deleted/orphan inodes
-        append_ext4_deleted_orphans(
-            &ext4,
-            filesystem_index,
-            root_id,
-            &mut next_node_id,
-            &mut nodes,
-            &mut warnings,
-            &journal_hints,
-        );
+        // Deleted orphan scan skipped in default path — too expensive for
+        // reimaged drives. Use --deep for deleted file recovery.
 
         sessions.push(FilesystemSessionArtifact {
             filesystem_index,
@@ -1047,17 +1039,9 @@ fn build_filesystem_sessions_binary(
             );
         }
 
-        // Only run deleted orphan scan if we didn't already do a full inode scan
-        // (the full inode scan already finds all deleted inodes)
-        if root_inode_ok.is_some() {
-            append_ext4_deleted_orphans_compact(
-                &ext4,
-                filesystem_index as u16,
-                root_idx,
-                &mut tree,
-                &journal_hints,
-            );
-        }
+        // Deleted orphan scan skipped in default path — it scans ALL inode
+        // slots which can find millions of "deleted" entries on reimaged drives.
+        // Use --deep for deleted file recovery.
     }
 
     // Save to binary .scn
