@@ -1117,12 +1117,9 @@ fn run_scan(
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            // Show progress as entries / total_inodes (expand if we exceed estimate)
-            if state.phase_total_bytes > 0 {
-                let total = state.phase_total_bytes.max(state.bytes_scanned);
-                progress_bar2.set_length(total);
-                progress_bar2.set_position(state.bytes_scanned);
-            }
+            let total = state.phase_total_bytes.max(state.bytes_scanned);
+            progress_bar2.set_length(total);
+            progress_bar2.set_position(state.bytes_scanned.min(total));
 
             let elapsed = state.phase_start_time.elapsed().as_secs();
             let elapsed_str = if elapsed >= 3600 {
@@ -1133,26 +1130,18 @@ fn run_scan(
                 format!("{}s", elapsed)
             };
 
-            let pct = if state.phase_total_bytes > 0 {
-                format!(" ({:.1}%)", state.bytes_scanned as f64 / state.phase_total_bytes as f64 * 100.0)
-            } else {
-                String::new()
-            };
-
             progress_bar2.set_message(format!(
-                " | Building file tree: {} / {} inodes{}{}{} | Elapsed: {}",
-                state.bytes_scanned,
-                state.phase_total_bytes,
-                pct,
+                " | Scanning inodes{}{} | Elapsed: {} | {} entries | Memory: {}",
                 state.speed_str(),
                 state.eta_str(),
                 elapsed_str,
+                state.bytes_scanned,
+                bytesize::ByteSize(state.bytes_scanned * 64),
             ));
 
             stats_bar2.set_message(format!(
-                "Filesystems: {} | Memory: {}",
+                "Filesystems: {}",
                 state.fs_summary(),
-                bytesize::ByteSize(state.bytes_scanned * 64),
             ));
         };
 
