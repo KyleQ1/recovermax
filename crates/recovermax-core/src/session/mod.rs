@@ -1,6 +1,7 @@
 pub mod binary_format;
 pub mod binary_reader;
 pub mod binary_writer;
+pub mod compact_tree;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -947,44 +948,399 @@ fn build_filesystem_sessions(
     Ok(sessions)
 }
 
-/// Build a binary .scn file by running the same tree builder but writing
-/// CompactNode records to disk via ScnWriter instead of buffering in RAM.
+/// Build a compact in-memory tree and optionally save to binary .scn.
+/// Uses CompactNode (64 bytes each) instead of SessionNode (~280 bytes).
+/// For 122M nodes: ~8 GB RAM vs 34 GB.
 fn build_filesystem_sessions_binary(
     reader: &ImageReader,
     report: &ScanReport,
     output_path: &Path,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
-    // Build the tree in memory (existing path), then stream to binary
-    let sessions = build_filesystem_sessions(reader, report, on_event)?;
+    let mut tree = compact_tree::CompactTree::new();
+    tree.filesystem_count = report.filesystems.len() as u16;
 
-    let mut writer = binary_writer::ScnWriter::create(output_path)?;
-    writer.set_filesystem_count(sessions.len() as u16);
-
-    // Map old node IDs to new sequential indices
-    for session in &sessions {
-        let mut id_to_index: HashMap<u64, u32> = HashMap::new();
-
-        for node in &session.nodes {
-            let parent_index = node
-                .parent_id
-                .and_then(|pid| id_to_index.get(&pid).copied())
-                .unwrap_or(u32::MAX);
-
-            let index = writer.add_session_node(node, parent_index)?;
-            id_to_index.insert(node.id, index);
+    for (filesystem_index, fs_info) in report.filesystems.iter().enumerate() {
+        if fs_info.fs_type != "ext4" {
+            continue;
         }
 
-        for warning in &session.warnings {
-            writer.add_warning(warning.clone());
+        let ext4 = match Ext4Fs::new(reader, fs_info.offset) {
+            Ok(ext4) => ext4,
+            Err(err) => {
+                tree.add_warning(format_traversal_warning(
+                    "/",
+                    &format!("failed to open ext4 at offset {}: {}", fs_info.offset, err),
+                ));
+                continue;
+            }
+        };
+
+        if let Some(cb) = on_event {
+            cb(crate::scan::ScanEvent::TreeBuildStarted {
+                filesystem_index,
+                label: fs_info.label.clone(),
+            });
+        }
+
+        let root_inode_ok = ext4.read_inode(2).ok();
+        let root_idx = tree.add_node(
+            root_inode_ok.as_ref().map_or(2, |i| i.number),
+            u32::MAX,
+            "/",
+            filesystem_index as u16,
+            FileType::Directory,
+            root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
+            EntrySource::Filesystem,
+            root_inode_ok.as_ref().map_or(u64::MAX, |i| i.size),
+            0,
+            root_inode_ok.as_ref().map_or(0, |i| i.ctime),
+            root_inode_ok.as_ref().map_or(0, |i| i.mtime),
+            root_inode_ok.as_ref().map_or(0, |i| i.atime),
+            0,
+        );
+
+        if root_inode_ok.is_some() {
+            match ext4.list_directory(2) {
+                Ok(root_entries) => {
+                    let mut visited = HashSet::from([2u64]);
+                    build_ext4_subtree_compact(
+                        &ext4,
+                        filesystem_index as u16,
+                        root_idx,
+                        &root_entries,
+                        &mut visited,
+                        &mut tree,
+                        0,
+                        on_event,
+                    );
+                }
+                Err(err) => {
+                    tree.add_warning(format_traversal_warning(
+                        "/",
+                        &format!("failed to read root directory: {}", err),
+                    ));
+                }
+            }
+        } else {
+            tree.add_warning(format_traversal_warning(
+                "/",
+                "Root inode unreadable. Scanning all block groups for recoverable files.",
+            ));
+        }
+
+        if let Some(cb) = on_event {
+            cb(crate::scan::ScanEvent::TreeBuildComplete {
+                filesystem_index,
+                total_nodes: tree.node_count(),
+            });
+        }
+
+        let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
+
+        if root_inode_ok.is_none() {
+            append_ext4_all_inodes_compact(
+                &ext4,
+                filesystem_index as u16,
+                root_idx,
+                &mut tree,
+                &journal_hints,
+                on_event,
+            );
+        }
+
+        // Deleted orphan scan
+        append_ext4_deleted_orphans_compact(
+            &ext4,
+            filesystem_index as u16,
+            root_idx,
+            &mut tree,
+            &journal_hints,
+        );
+    }
+
+    // Save to binary .scn
+    let metadata = serde_json::to_string(&report)?;
+    tree.save_to_binary(output_path, &metadata)?;
+
+    tracing::info!(
+        "Binary .scn saved: {} nodes, {} memory, {} on disk",
+        tree.node_count(),
+        bytesize::ByteSize(tree.estimated_memory_bytes() as u64),
+        bytesize::ByteSize(std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0)),
+    );
+
+    Ok(())
+}
+
+const MAX_TREE_DEPTH_COMPACT: usize = 64;
+
+fn build_ext4_subtree_compact(
+    ext4: &Ext4Fs<'_>,
+    filesystem_index: u16,
+    parent_index: u32,
+    entries: &[crate::fs::DirEntry],
+    visited: &mut HashSet<u64>,
+    tree: &mut compact_tree::CompactTree,
+    depth: usize,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+) {
+    if depth >= MAX_TREE_DEPTH_COMPACT {
+        return;
+    }
+
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+
+        let mut file_type = entry.file_type;
+        let mut size = entry.size;
+        let mut deleted = entry.deleted;
+        let mut ctime = 0u32;
+        let mut mtime = 0u32;
+        let mut atime = 0u32;
+        let mut dtime = 0u32;
+
+        if entry.inode > 0 {
+            if let Ok(inode) = ext4.read_inode(entry.inode) {
+                file_type = inode.file_type();
+                size = inode.size;
+                deleted |= inode.is_deleted();
+                ctime = inode.ctime;
+                mtime = inode.mtime;
+                atime = inode.atime;
+                dtime = inode.dtime;
+            }
+        }
+
+        let node_idx = tree.add_node(
+            entry.inode,
+            parent_index,
+            &entry.name,
+            filesystem_index,
+            file_type,
+            deleted,
+            entry.source,
+            size,
+            entry.parent_inode.unwrap_or(0),
+            ctime,
+            mtime,
+            atime,
+            dtime,
+        );
+
+        // Progress callback every 500 nodes
+        if let Some(cb) = on_event {
+            if tree.node_count() % 500 == 0 {
+                cb(crate::scan::ScanEvent::TreeBuildProgress {
+                    filesystem_index: filesystem_index as usize,
+                    files_found: tree.node_count(),
+                    dirs_found: 0,
+                });
+            }
+        }
+
+        if file_type == FileType::Directory && entry.inode > 0 && visited.insert(entry.inode) {
+            match ext4.list_directory(entry.inode) {
+                Ok(children) => {
+                    build_ext4_subtree_compact(
+                        ext4,
+                        filesystem_index,
+                        node_idx,
+                        &children,
+                        visited,
+                        tree,
+                        depth + 1,
+                        on_event,
+                    );
+                }
+                Err(err) => {
+                    tree.add_warning(format_traversal_warning(
+                        &tree.compute_path(node_idx),
+                        &format!("failed to read directory (inode {}): {}", entry.inode, err),
+                    ));
+                }
+            }
+            visited.remove(&entry.inode);
+        }
+    }
+}
+
+fn append_ext4_all_inodes_compact(
+    ext4: &Ext4Fs<'_>,
+    filesystem_index: u16,
+    root_idx: u32,
+    tree: &mut compact_tree::CompactTree,
+    journal_hints: &std::collections::HashMap<u64, String>,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+) {
+    let inode_size = ext4.superblock.inode_size as usize;
+    let inodes_per_group = ext4.superblock.inodes_per_group;
+    let block_size = ext4.superblock.block_size() as usize;
+    let num_groups = (ext4.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+    let inodes_per_block = block_size / inode_size;
+
+    let recovered_dir = tree.add_node(
+        0, root_idx, "$RecoveredFiles", filesystem_index,
+        FileType::Directory, false, EntrySource::SyntheticOrphan,
+        u64::MAX, 0, 0, 0, 0, 0,
+    );
+
+    let mut found = 0usize;
+    let mut seen = HashSet::new();
+
+    for group in 0..num_groups {
+        let bg = match ext4.read_group_descriptor(group) {
+            Ok(bg) => bg,
+            Err(_) => continue,
+        };
+        if bg.inode_table == 0 || bg.inode_table >= ext4.superblock.blocks_count {
+            continue;
+        }
+
+        let inode_table_blocks = (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+
+        for tbl_block in 0..inode_table_blocks {
+            let abs_block = bg.inode_table + tbl_block as u64;
+            let block_data = match ext4.read_block(abs_block) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for slot in 0..inodes_per_block {
+                let local_index = tbl_block * inodes_per_block + slot;
+                if local_index >= inodes_per_group as usize {
+                    break;
+                }
+
+                let inode_num = group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
+                if inode_num <= 10 || !seen.insert(inode_num) {
+                    continue;
+                }
+
+                let off = slot * inode_size;
+                if off + inode_size > block_data.len() {
+                    break;
+                }
+
+                let data = &block_data[off..off + inode_size];
+                let mode = u16::from_le_bytes([data[0], data[1]]);
+                let size_lo = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+                let dtime = u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
+                let links_count = u16::from_le_bytes([data[26], data[27]]);
+                let mtime = u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
+                let atime = u32::from_le_bytes(data[8..12].try_into().unwrap_or([0; 4]));
+                let ctime = u32::from_le_bytes(data[12..16].try_into().unwrap_or([0; 4]));
+                let size_hi = if data.len() >= 112 {
+                    u32::from_le_bytes(data[108..112].try_into().unwrap_or([0; 4]))
+                } else {
+                    0
+                };
+                let size = (size_hi as u64) << 32 | size_lo as u64;
+
+                if mode == 0 || size == 0 {
+                    continue;
+                }
+
+                let is_deleted = dtime != 0 || links_count == 0;
+                let file_type = match mode & 0xF000 {
+                    0x4000 => FileType::Directory,
+                    0x8000 => FileType::RegularFile,
+                    0xA000 => FileType::Symlink,
+                    _ => continue,
+                };
+
+                let basename = journal_hints
+                    .get(&inode_num)
+                    .map(|s| s.as_str())
+                    .unwrap_or_else(|| if is_deleted { "OrphanFile" } else { "File" });
+
+                // Use inode number in name to make it unique
+                let full_name = if basename == "OrphanFile" || basename == "File" {
+                    format!("{}-{}", basename, inode_num)
+                } else {
+                    basename.to_string()
+                };
+
+                tree.add_node(
+                    inode_num, recovered_dir, &full_name, filesystem_index,
+                    file_type, is_deleted,
+                    if is_deleted { EntrySource::SyntheticOrphan } else { EntrySource::Filesystem },
+                    size, 0, ctime, mtime, atime, dtime,
+                );
+
+                found += 1;
+
+                if let Some(cb) = on_event {
+                    if found % 500 == 0 {
+                        cb(crate::scan::ScanEvent::TreeBuildProgress {
+                            filesystem_index: filesystem_index as usize,
+                            files_found: found,
+                            dirs_found: 0,
+                        });
+                    }
+                }
+            }
         }
     }
 
-    // Serialize metadata
-    let metadata = serde_json::to_string(&report)?;
-    writer.finalize(&metadata)?;
+    if found > 0 {
+        tracing::info!("Full inode scan found {} recoverable inodes", found);
+    }
+}
 
-    Ok(())
+fn append_ext4_deleted_orphans_compact(
+    ext4: &Ext4Fs<'_>,
+    filesystem_index: u16,
+    root_idx: u32,
+    tree: &mut compact_tree::CompactTree,
+    journal_hints: &std::collections::HashMap<u64, String>,
+) {
+    let deleted_inodes = match ext4.scan_deleted_inodes() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    if deleted_inodes.is_empty() {
+        return;
+    }
+
+    // Check which inodes are already in the tree
+    let existing: HashSet<u64> = tree
+        .nodes
+        .iter()
+        .filter(|n| n.inode != 0)
+        .map(|n| n.inode)
+        .collect();
+
+    let orphans: Vec<_> = deleted_inodes
+        .into_iter()
+        .filter(|d| !existing.contains(&d.inode_num))
+        .collect();
+
+    if orphans.is_empty() {
+        return;
+    }
+
+    let orphan_dir = tree.add_node(
+        0, root_idx, "$OrphanFiles", filesystem_index,
+        FileType::Directory, false, EntrySource::SyntheticOrphan,
+        u64::MAX, 0, 0, 0, 0, 0,
+    );
+
+    for orphan in &orphans {
+        let basename = journal_hints
+            .get(&orphan.inode_num)
+            .cloned()
+            .unwrap_or_else(|| format!("OrphanFile-{}", orphan.inode_num));
+
+        tree.add_node(
+            orphan.inode_num, orphan_dir, &basename, filesystem_index,
+            orphan.file_type, true, EntrySource::SyntheticOrphan,
+            orphan.size, 0, orphan.ctime, orphan.mtime, orphan.atime, orphan.dtime,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
