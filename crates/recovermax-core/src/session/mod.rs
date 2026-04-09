@@ -1265,10 +1265,24 @@ fn append_ext4_all_inodes_compact(
                     continue;
                 }
 
+                // Skip inodes with implausible metadata to avoid creating
+                // millions of entries for garbage data on reimaged drives
+                let is_deleted = dtime != 0 || links_count == 0;
+
+                // Skip deleted inodes with no timestamps (likely garbage)
+                if is_deleted && mtime == 0 && ctime == 0 {
+                    continue;
+                }
+
+                // Skip files larger than the filesystem (corrupt size field)
+                let fs_total = ext4.superblock.blocks_count * ext4.superblock.block_size() as u64;
+                if size > fs_total {
+                    continue;
+                }
+
                 // Mark as seen in bitmap
                 seen[ino / 8] |= 1 << (ino % 8);
 
-                let is_deleted = dtime != 0 || links_count == 0;
                 let file_type = match mode & 0xF000 {
                     0x4000 => FileType::Directory,
                     0x8000 => FileType::RegularFile,
