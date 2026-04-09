@@ -1022,20 +1022,52 @@ fn run_scan(
     if let Some(ref path) = output {
         println!("Building directory tree...");
 
-        let pb = indicatif::ProgressBar::new_spinner();
+        let start_time = Instant::now();
+        let image_size = reader.len();
+
+        let pb = indicatif::ProgressBar::new(image_size);
         pb.set_style(
-            indicatif::ProgressStyle::with_template(" {spinner:.green} {msg}")
-                .unwrap(),
+            indicatif::ProgressStyle::with_template(
+                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
         );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.enable_steady_tick(std::time::Duration::from_millis(200));
 
         let pb_clone = pb.clone();
         let callback = move |event: ScanEvent| {
-            if let ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } = &event {
-                pb_clone.set_message(format!(
-                    "{} files, {} dirs found",
-                    files_found, dirs_found,
-                ));
+            match &event {
+                ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
+                    let total = *files_found + *dirs_found;
+                    // Approximate progress: each entry reads ~256 bytes of inode data
+                    let bytes_read = (total as u64) * 256;
+                    pb_clone.set_position(bytes_read.min(image_size));
+
+                    let elapsed = start_time.elapsed().as_secs();
+                    let elapsed_str = if elapsed >= 3600 {
+                        format!("{}h{}m", elapsed / 3600, (elapsed % 3600) / 60)
+                    } else if elapsed >= 60 {
+                        format!("{}m{}s", elapsed / 60, elapsed % 60)
+                    } else {
+                        format!("{}s", elapsed)
+                    };
+
+                    let rate = if elapsed > 0 { total as u64 / elapsed } else { 0 };
+
+                    pb_clone.set_message(format!(
+                        "| {} files, {} dirs | {}/s | Elapsed: {} | Memory: {}",
+                        files_found,
+                        dirs_found,
+                        rate,
+                        elapsed_str,
+                        bytesize::ByteSize((total as u64) * 280), // ~280 bytes per SessionNode
+                    ));
+                }
+                ScanEvent::TreeBuildStarted { label, .. } => {
+                    pb_clone.set_message(format!("| Scanning {}...", label));
+                }
+                _ => {}
             }
         };
 
