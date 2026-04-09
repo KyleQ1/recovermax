@@ -1071,20 +1071,16 @@ fn run_scan(
             }
         };
 
-        // Build tree using directory walk only (no full inode scan)
-        let artifact = RecoverySessionArtifact::from_scan_with_callback(
+        // Build tree using CompactTree (64 bytes/node) and save to binary .scn
+        RecoverySessionArtifact::build_binary_scn(
             image,
             &reader,
-            report,
+            &report,
+            path,
             Some(&callback),
         )?;
 
         pb.finish_and_clear();
-
-        let total_nodes: usize = artifact.filesystems.iter().map(|f| f.nodes.len()).sum();
-        println!("Tree built: {} entries", total_nodes);
-
-        artifact.save_to_path(path)?;
         println!("Session saved to {}", path.display());
 
         println!("\nBrowse with:");

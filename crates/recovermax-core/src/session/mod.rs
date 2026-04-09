@@ -953,18 +953,9 @@ fn build_filesystem_sessions_binary(
     output_path: &Path,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
-    // Pre-allocate based on total inodes across all filesystems
-    let total_inodes: usize = report
-        .filesystems
-        .iter()
-        .filter(|f| f.fs_type == "ext4")
-        .filter_map(|f| {
-            Ext4Fs::new(reader, f.offset)
-                .ok()
-                .map(|ext4| ext4.superblock.inodes_count as usize)
-        })
-        .sum();
-    let mut tree = compact_tree::CompactTree::with_capacity(total_inodes);
+    // Start with moderate capacity — grows as needed.
+    // Don't pre-allocate for total_inodes (could be 122M = 7.8 GB).
+    let mut tree = compact_tree::CompactTree::with_capacity(1_000_000);
     tree.filesystem_count = report.filesystems.len() as u16;
 
     for (filesystem_index, fs_info) in report.filesystems.iter().enumerate() {
