@@ -1020,11 +1020,12 @@ fn run_scan(
     // Calls drop_cache() every 100K nodes to bound RSS from mmap page cache.
     if let Some(ref path) = output {
         let image_size = reader.len();
+        let image_size_str = bytesize::ByteSize(image_size).to_string();
 
         let pb = indicatif::ProgressBar::new(image_size);
         pb.set_style(
             indicatif::ProgressStyle::with_template(
-                " {spinner:.green} [{bar:40.cyan/blue}] {msg}",
+                " {spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}",
             )
             .unwrap()
             .progress_chars("=>-"),
@@ -1036,34 +1037,49 @@ fn run_scan(
         let callback = move |event: ScanEvent| {
             match &event {
                 ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    let total = *files_found as u64;
-                    pb_clone.set_position(total.min(image_size));
+                    // Estimate bytes scanned: each entry reads ~4KB of inode+dir data
+                    let bytes_est = (*files_found as u64) * 4096;
+                    pb_clone.set_position(bytes_est.min(image_size));
 
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
-                    let speed = if elapsed_secs > 0.5 {
-                        total as f64 / elapsed_secs
+                    let entries_per_sec = if elapsed_secs > 0.5 {
+                        *files_found as f64 / elapsed_secs
                     } else {
                         0.0
                     };
 
-                    let elapsed_str = if elapsed_secs >= 3600.0 {
-                        format!("{}h{}m", elapsed_secs as u64 / 3600, (elapsed_secs as u64 % 3600) / 60)
-                    } else if elapsed_secs >= 60.0 {
-                        format!("{}m{}s", elapsed_secs as u64 / 60, elapsed_secs as u64 % 60)
+                    let elapsed_str = format_duration(elapsed_secs);
+
+                    // ETA based on image size vs estimated bytes scanned
+                    let eta_str = if bytes_est > 0 && bytes_est < image_size && elapsed_secs > 1.0 {
+                        let speed_bytes = bytes_est as f64 / elapsed_secs;
+                        let remaining = (image_size - bytes_est) as f64;
+                        let eta_secs = remaining / speed_bytes;
+                        format!(" | ETA: {}", format_duration(eta_secs))
                     } else {
-                        format!("{}s", elapsed_secs as u64)
+                        String::new()
                     };
 
+                    // Memory: CompactNode tree + string table estimate
+                    let mem_bytes = (*files_found as u64) * 64 + (*files_found as u64 / 10) * 20;
+
                     pb_clone.set_message(format!(
-                        "{} files, {} dirs | {:.0}/s | {}",
-                        files_found, dirs_found, speed, elapsed_str,
+                        "| {} files, {} dirs | {:.0} entries/s{} | Elapsed: {} | Mem: {} | Image: {}",
+                        files_found, dirs_found, entries_per_sec,
+                        eta_str, elapsed_str,
+                        bytesize::ByteSize(mem_bytes),
+                        image_size_str,
                     ));
                 }
-                ScanEvent::TreeBuildStarted { label, .. } => {
-                    pb_clone.set_message(format!("Scanning {}...", label));
+                ScanEvent::TreeBuildStarted { label, total_inodes, .. } => {
+                    pb_clone.set_message(format!(
+                        "| Scanning {} ({} inodes)...",
+                        label,
+                        format_count(*total_inodes),
+                    ));
                 }
                 ScanEvent::TreeBuildComplete { total_nodes, .. } => {
-                    pb_clone.set_message(format!("{} nodes indexed", total_nodes));
+                    pb_clone.set_message(format!("| {} nodes indexed", total_nodes));
                 }
                 _ => {}
             }
@@ -1092,6 +1108,29 @@ fn run_scan(
 /// Save a metadata-only binary .scn file (zero nodes).
 /// Contains partition/filesystem locations from the scan report.
 /// Directory tree is read on-demand during browse commands.
+fn format_duration(secs: f64) -> String {
+    let s = secs as u64;
+    if s >= 3600 {
+        format!("{}h{}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m{}s", s / 60, s % 60)
+    } else {
+        format!("{}s", s)
+    }
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
 fn save_metadata_scn(report: &recovermax_core::scan::ScanReport, path: &Path) -> Result<()> {
     use recovermax_core::session::compact_tree::CompactTree;
 
