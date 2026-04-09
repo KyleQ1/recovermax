@@ -1006,7 +1006,7 @@ fn run_scan(
         }
     }
 
-    // Quick scan: find partitions + filesystems (no tree building)
+    // Phase 1: Find partitions + filesystems (quick)
     let options = ScanOptions {
         deep_scan,
         ..Default::default()
@@ -1016,17 +1016,51 @@ fn run_scan(
 
     println!("{}", report.summary());
 
-    // Save lightweight .scn (just partition/filesystem metadata — no inode tree)
+    // Phase 2: Build directory tree for browsable filesystems
+    // This walks directories (NOT all inode slots), so it's fast and low RAM.
+    // A filesystem with 500K files uses ~32 MB.
     if let Some(ref path) = output {
-        let artifact = RecoverySessionArtifact::from_report(image, report);
+        println!("Building directory tree...");
+
+        let pb = indicatif::ProgressBar::new_spinner();
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(" {spinner:.green} {msg}")
+                .unwrap(),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        let pb_clone = pb.clone();
+        let callback = move |event: ScanEvent| {
+            if let ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } = &event {
+                pb_clone.set_message(format!(
+                    "{} files, {} dirs found",
+                    files_found, dirs_found,
+                ));
+            }
+        };
+
+        // Build tree using directory walk only (no full inode scan)
+        let artifact = RecoverySessionArtifact::from_scan_with_callback(
+            image,
+            &reader,
+            report,
+            Some(&callback),
+        )?;
+
+        pb.finish_and_clear();
+
+        let total_nodes: usize = artifact.filesystems.iter().map(|f| f.nodes.len()).sum();
+        println!("Tree built: {} entries", total_nodes);
+
         artifact.save_to_path(path)?;
         println!("Session saved to {}", path.display());
-    }
 
-    println!("\nBrowse filesystems on demand:");
-    println!("  recovermax ls {} --fs 0", image.display());
-    println!("  recovermax search {} \"*.txt\"", image.display());
-    println!("  recovermax recover {} -d ./output/ -p /home", image.display());
+        println!("\nBrowse with:");
+        println!("  recovermax ls {} -s {} --fs 0", image.display(), path.display());
+        println!("  recovermax search {} \"ming\" -s {}", image.display(), path.display());
+    } else {
+        println!("\nTip: Use -o session.scn to build a session for faster browsing.");
+    }
 
     Ok(())
 }

@@ -906,19 +906,14 @@ fn build_filesystem_sessions(
 
         let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
 
-        // When root is corrupt, scan ALL block groups for any readable inodes.
-        // This finds files in intact block groups deeper in the disk.
+        // When root is corrupt, skip the expensive full inode scan.
+        // The scan summary already flagged this as "root damaged".
+        // A future --deep option will handle full inode recovery.
         if root_inode_ok.is_none() {
-            tracing::info!("Scanning all block groups for recoverable inodes...");
-            append_ext4_all_inodes(
-                &ext4,
-                filesystem_index,
-                root_id,
-                &mut next_node_id,
-                &mut nodes,
-                &mut warnings,
-                &journal_hints,
-                on_event,
+            tracing::info!(
+                "Root inode unreadable for filesystem {} — skipping tree build. \
+                 Use --deep for full inode recovery.",
+                filesystem_index
             );
         }
 
