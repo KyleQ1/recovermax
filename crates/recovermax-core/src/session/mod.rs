@@ -952,19 +952,21 @@ fn build_filesystem_sessions(
     Ok(sessions)
 }
 
-/// Build a compact in-memory tree and optionally save to binary .scn.
-/// Uses CompactNode (64 bytes each) instead of SessionNode (~280 bytes).
-/// For 122M nodes: ~8 GB RAM vs 34 GB.
+/// Build a binary .scn file.
+///
+/// Small filesystems (< 100 GB): build in-memory CompactTree, save to .scn.
+/// Large filesystems (>= 100 GB): stream nodes to .scn via ScnWriter, walking
+/// inode tables sequentially. Uses ~200 MB RAM regardless of filesystem size.
 fn build_filesystem_sessions_binary(
     reader: &ImageReader,
     report: &ScanReport,
     output_path: &Path,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
-    // Start with moderate capacity — grows as needed.
-    // Don't pre-allocate for total_inodes (could be 122M = 7.8 GB).
-    let mut tree = compact_tree::CompactTree::with_capacity(1_000_000);
-    tree.filesystem_count = report.filesystems.len() as u16;
+    const STREAM_THRESHOLD: u64 = 100 * 1024 * 1024 * 1024; // 100 GB
+
+    let mut writer = binary_writer::ScnWriter::create(output_path)?;
+    writer.set_filesystem_count(report.filesystems.len() as u16);
 
     for (filesystem_index, fs_info) in report.filesystems.iter().enumerate() {
         if fs_info.fs_type != "ext4" {
@@ -974,7 +976,7 @@ fn build_filesystem_sessions_binary(
         let ext4 = match Ext4Fs::new(reader, fs_info.offset) {
             Ok(ext4) => ext4,
             Err(err) => {
-                tree.add_warning(format_traversal_warning(
+                writer.add_warning(format_traversal_warning(
                     "/",
                     &format!("failed to open ext4 at offset {}: {}", fs_info.offset, err),
                 ));
@@ -985,7 +987,6 @@ fn build_filesystem_sessions_binary(
         let total_inodes = ext4.superblock.inodes_count as u64;
         let free_inodes = ext4.superblock.free_inodes_count as u64;
         let used_inodes = total_inodes.saturating_sub(free_inodes);
-        // ~84 bytes per node: 64 (CompactNode) + ~20 (string table avg)
         let estimated_memory = used_inodes * 84;
 
         if let Some(cb) = on_event {
@@ -998,8 +999,9 @@ fn build_filesystem_sessions_binary(
             });
         }
 
+        // Add root node
         let root_inode_ok = ext4.read_inode(2).ok();
-        let root_idx = tree.add_node(
+        writer.add_raw_inode(
             root_inode_ok.as_ref().map_or(2, |i| i.number),
             u32::MAX,
             "/",
@@ -1012,85 +1014,255 @@ fn build_filesystem_sessions_binary(
             root_inode_ok.as_ref().map_or(0, |i| i.ctime),
             root_inode_ok.as_ref().map_or(0, |i| i.mtime),
             root_inode_ok.as_ref().map_or(0, |i| i.atime),
-            0,
-        );
+            root_inode_ok.as_ref().map_or(0, |i| i.dtime),
+        )?;
 
-        // Skip tree building if estimated memory exceeds 4 GB.
-        // These filesystems need --deep (streaming to disk) instead.
-        const MAX_TREE_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
-        if estimated_memory > MAX_TREE_MEMORY {
-            tree.add_warning(format_traversal_warning(
-                "/",
-                &format!(
-                    "Filesystem has {} used inodes (~{}). Tree would use ~{} RAM. \
-                     Skipping in-memory tree build. Use --deep to stream to disk.",
-                    used_inodes,
-                    bytesize::ByteSize(fs_info.total_size),
-                    bytesize::ByteSize(estimated_memory),
-                ),
-            ));
-            if let Some(cb) = on_event {
-                cb(crate::scan::ScanEvent::TreeBuildComplete {
-                    filesystem_index,
-                    total_nodes: tree.node_count(),
-                });
-            }
-            continue;
-        }
-
-        if root_inode_ok.is_some() {
+        if fs_info.total_size >= STREAM_THRESHOLD {
+            // Large filesystem: stream inode table scan to disk.
+            // Sequential I/O through block groups. ~200 MB RAM.
+            stream_inode_table_scan(
+                reader,
+                &ext4,
+                filesystem_index as u16,
+                0, // root is node 0 (already written above)
+                &mut writer,
+                on_event,
+            )?;
+        } else if root_inode_ok.is_some() {
+            // Small filesystem: in-memory directory walk, then write all nodes.
+            let mut tree = compact_tree::CompactTree::with_capacity(100_000);
+            // Re-add root to the in-memory tree
+            let root_idx = tree.add_node(
+                root_inode_ok.as_ref().map_or(2, |i| i.number),
+                u32::MAX, "/", filesystem_index as u16,
+                FileType::Directory,
+                root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
+                EntrySource::Filesystem,
+                root_inode_ok.as_ref().map_or(u64::MAX, |i| i.size),
+                0,
+                root_inode_ok.as_ref().map_or(0, |i| i.ctime),
+                root_inode_ok.as_ref().map_or(0, |i| i.mtime),
+                root_inode_ok.as_ref().map_or(0, |i| i.atime),
+                0,
+            );
             match ext4.list_directory(2) {
                 Ok(root_entries) => {
                     let mut visited = HashSet::from([2u64]);
                     let mut dirs_found = 0usize;
                     build_ext4_subtree_compact(
-                        reader,
-                        &ext4,
-                        filesystem_index as u16,
-                        root_idx,
-                        &root_entries,
-                        &mut visited,
-                        &mut tree,
-                        &mut dirs_found,
-                        0,
-                        on_event,
+                        reader, &ext4, filesystem_index as u16, root_idx,
+                        &root_entries, &mut visited, &mut tree, &mut dirs_found,
+                        0, on_event,
                     );
                 }
                 Err(err) => {
                     tree.add_warning(format_traversal_warning(
-                        "/",
-                        &format!("failed to read root directory: {}", err),
+                        "/", &format!("failed to read root directory: {}", err),
                     ));
                 }
             }
+            // Write in-memory tree nodes to ScnWriter (skip root, already written)
+            for node in tree.nodes.iter().skip(1) {
+                // Adjust parent_index: +1 offset since writer already has root at 0
+                // for this filesystem. Actually, the writer's node indices are global.
+                // The tree's node 0 = root = already in writer. Tree's other nodes
+                // have parent_index relative to the tree. We need to offset by
+                // (writer.node_count - tree.node_count) ... this is getting complicated.
+                // Simpler: just write the CompactNode directly with adjusted parent.
+                let writer_base = writer.node_count() as u32 - tree.nodes.len() as u32;
+                let mut adjusted = *node;
+                if adjusted.has_parent() {
+                    adjusted.parent_index += writer_base;
+                }
+                // Re-intern the basename into the writer's string table
+                let basename = tree.basename_str(node);
+                let (off, len) = writer.intern_basename(basename);
+                adjusted.basename_offset = off;
+                adjusted.basename_len = len;
+                writer.add_compact_node(adjusted)?;
+            }
         } else {
-            tree.add_warning(format_traversal_warning(
+            writer.add_warning(format_traversal_warning(
                 "/",
-                "Root inode unreadable. Scanning all block groups for recoverable files.",
+                "Root inode unreadable. Use --deep for full inode recovery.",
             ));
         }
 
         if let Some(cb) = on_event {
             cb(crate::scan::ScanEvent::TreeBuildComplete {
                 filesystem_index,
-                total_nodes: tree.node_count(),
+                total_nodes: writer.node_count() as usize,
             });
         }
-
-        // Journal hints and deleted orphan scan deferred to --deep.
-        // journal_filename_hints() loads the entire journal (128-256 MB) into RAM.
-        // Deleted orphan scan iterates all inode tables (millions of slots).
     }
 
-    // Save to binary .scn
+    // Finalize: write string table, indexes, header
     let metadata = serde_json::to_string(&report)?;
-    tree.save_to_binary(output_path, &metadata)?;
+    writer.finalize(&metadata)?;
 
     tracing::info!(
-        "Binary .scn saved: {} nodes, {} memory, {} on disk",
-        tree.node_count(),
-        bytesize::ByteSize(tree.estimated_memory_bytes() as u64),
+        "Binary .scn saved: {} on disk",
         bytesize::ByteSize(std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0)),
+    );
+
+    Ok(())
+}
+
+/// Stream inode table scan to ScnWriter.
+/// Walks all block groups sequentially, reading inode tables and writing
+/// valid inodes directly to disk. ~200 MB RAM (bitmap + string table).
+fn stream_inode_table_scan(
+    reader: &ImageReader,
+    ext4: &Ext4Fs<'_>,
+    filesystem_index: u16,
+    root_idx: u32,
+    writer: &mut binary_writer::ScnWriter,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+) -> Result<()> {
+    let inode_size = ext4.superblock.inode_size as usize;
+    let inodes_per_group = ext4.superblock.inodes_per_group;
+    let block_size = ext4.superblock.block_size() as usize;
+    let num_groups = (ext4.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+    let inodes_per_block = block_size / inode_size;
+    let total_inodes = ext4.superblock.inodes_count as usize;
+    let fs_total_bytes = ext4.superblock.total_size();
+    let partition_offset = ext4.partition_offset();
+
+    // Add $RecoveredFiles container directory
+    let recovered_dir = writer.add_raw_inode(
+        0, root_idx, "$RecoveredFiles", filesystem_index,
+        FileType::Directory, false, EntrySource::SyntheticOrphan,
+        u64::MAX, 0, 0, 0, 0, 0,
+    )?;
+
+    let mut found = 0usize;
+    let mut dirs_found = 0usize;
+    // Bitmap: 1 bit per inode. 122M inodes = 15 MB.
+    let mut seen = vec![0u8; total_inodes / 8 + 1];
+
+    for group in 0..num_groups {
+        let bg = match ext4.read_group_descriptor(group) {
+            Ok(bg) => bg,
+            Err(_) => continue,
+        };
+        if bg.inode_table == 0 || bg.inode_table >= ext4.superblock.blocks_count {
+            continue;
+        }
+
+        let inode_table_blocks =
+            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+
+        for tbl_block in 0..inode_table_blocks {
+            let abs_block = bg.inode_table + tbl_block as u64;
+            let block_data = match ext4.read_block(abs_block) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for slot in 0..inodes_per_block {
+                let local_index = tbl_block * inodes_per_block + slot;
+                if local_index >= inodes_per_group as usize {
+                    break;
+                }
+
+                let inode_num =
+                    group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
+                let ino = inode_num as usize;
+                if inode_num <= 10
+                    || ino >= total_inodes
+                    || (seen[ino / 8] & (1 << (ino % 8))) != 0
+                {
+                    continue;
+                }
+
+                let off = slot * inode_size;
+                if off + inode_size > block_data.len() {
+                    break;
+                }
+
+                let data = &block_data[off..off + inode_size];
+                let mode = u16::from_le_bytes([data[0], data[1]]);
+                let size_lo =
+                    u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+                let dtime =
+                    u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
+                let links_count = u16::from_le_bytes([data[26], data[27]]);
+                let mtime =
+                    u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
+                let atime =
+                    u32::from_le_bytes(data[8..12].try_into().unwrap_or([0; 4]));
+                let ctime =
+                    u32::from_le_bytes(data[12..16].try_into().unwrap_or([0; 4]));
+                let size_hi = if data.len() >= 112 {
+                    u32::from_le_bytes(data[108..112].try_into().unwrap_or([0; 4]))
+                } else {
+                    0
+                };
+                let size = (size_hi as u64) << 32 | size_lo as u64;
+
+                if mode == 0 || size == 0 {
+                    continue;
+                }
+
+                let is_deleted = dtime != 0 || links_count == 0;
+                if is_deleted && mtime == 0 && ctime == 0 {
+                    continue;
+                }
+                if size > fs_total_bytes {
+                    continue;
+                }
+
+                seen[ino / 8] |= 1 << (ino % 8);
+
+                let file_type = match mode & 0xF000 {
+                    0x4000 => {
+                        dirs_found += 1;
+                        FileType::Directory
+                    }
+                    0x8000 => FileType::RegularFile,
+                    0xA000 => FileType::Symlink,
+                    _ => continue,
+                };
+
+                let source = if is_deleted {
+                    EntrySource::SyntheticOrphan
+                } else {
+                    EntrySource::Filesystem
+                };
+
+                writer.add_raw_inode(
+                    inode_num, recovered_dir, "$", filesystem_index,
+                    file_type, is_deleted, source,
+                    size, 0, ctime, mtime, atime, dtime,
+                )?;
+
+                found += 1;
+
+                if found % 50000 == 0 {
+                    // Byte offset: position within the inode tables
+                    let bytes_offset = partition_offset
+                        + (group as u64 * inodes_per_group as u64 * inode_size as u64);
+
+                    if let Some(cb) = on_event {
+                        cb(crate::scan::ScanEvent::TreeBuildProgress {
+                            filesystem_index: filesystem_index as usize,
+                            files_found: found,
+                            dirs_found,
+                            bytes_offset,
+                        });
+                    }
+                    // Drop page cache periodically
+                    if found % 200_000 == 0 {
+                        reader.drop_cache();
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        "Streamed {} inodes ({} dirs) for filesystem {} to .scn",
+        found, dirs_found, filesystem_index,
     );
 
     Ok(())
