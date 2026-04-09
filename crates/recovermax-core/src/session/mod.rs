@@ -1138,7 +1138,7 @@ fn build_ext4_subtree_compact(
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: filesystem_index as usize,
                     files_found: tree.node_count(),
-                    dirs_found: 0,
+                    dirs_found: 0, bytes_offset: 0,
                 });
             }
         }
@@ -1279,7 +1279,7 @@ fn append_ext4_all_inodes_compact(
                         cb(crate::scan::ScanEvent::TreeBuildProgress {
                             filesystem_index: filesystem_index as usize,
                             files_found: found,
-                            dirs_found: 0,
+                            dirs_found: 0, bytes_offset: 0,
                         });
                     }
                 }
@@ -1418,6 +1418,7 @@ fn build_ext4_subtree(
                     filesystem_index,
                     files_found: nodes.len() - dirs,
                     dirs_found: dirs,
+                    bytes_offset: 0,
                 });
             }
         }
@@ -1611,7 +1612,7 @@ fn append_ext4_all_inodes(
                         cb(crate::scan::ScanEvent::TreeBuildProgress {
                             filesystem_index,
                             files_found: found_count,
-                            dirs_found: 0,
+                            dirs_found: 0, bytes_offset: 0,
                         });
                     }
                 }

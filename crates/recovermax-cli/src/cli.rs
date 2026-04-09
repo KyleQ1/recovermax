@@ -821,14 +821,19 @@ impl ScanDisplay {
                 self.file_types_found += 1;
             }
             ScanEvent::PhaseComplete { .. } => {}
-            ScanEvent::TreeBuildStarted { total_inodes, .. } => {
+            ScanEvent::TreeBuildStarted { .. } => {
                 self.current_phase = ScanPhase::TreeBuilding;
                 self.bytes_scanned = 0;
-                self.phase_total_bytes = *total_inodes;
+                // phase_total_bytes stays as image_size from PhaseStarted
+                self.phase_total_bytes = self.image_size;
                 self.phase_start_time = Instant::now();
             }
-            ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
+            ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } => {
                 self.bytes_scanned = (*files_found + *dirs_found) as u64;
+                if *bytes_offset > 0 {
+                    // Use actual disk offset for progress bar position
+                    self.phase_total_bytes = self.image_size;
+                }
             }
             ScanEvent::TreeBuildComplete { total_nodes, .. } => {
                 self.bytes_scanned = *total_nodes as u64;
@@ -1103,11 +1108,11 @@ fn run_scan(
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
 
-        // Hide block map and switch progress bar to entry-count style
+        // Hide block map and switch progress bar to bytes style for tree building
         block_bar.finish_and_clear();
         progress_bar.set_style(
             ProgressStyle::with_template(
-                " {spinner:.green} {bar:40.cyan/blue} {pos}/{len}{msg}",
+                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes}{msg}",
             )
             .unwrap()
             .progress_chars("=>-"),
@@ -1117,9 +1122,11 @@ fn run_scan(
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            let total = state.phase_total_bytes.max(state.bytes_scanned);
+            // Progress bar in bytes (image_size total)
+            let total = state.image_size;
+            let scanned = (state.bytes_scanned * 256).min(total);
             progress_bar2.set_length(total);
-            progress_bar2.set_position(state.bytes_scanned.min(total));
+            progress_bar2.set_position(scanned);
 
             let elapsed = state.phase_start_time.elapsed().as_secs();
             let elapsed_str = if elapsed >= 3600 {
@@ -1131,7 +1138,7 @@ fn run_scan(
             };
 
             progress_bar2.set_message(format!(
-                " | Scanning inodes{}{} | Elapsed: {} | {} entries | Memory: {}",
+                " | Building tree{}{} | Elapsed: {} | {} entries | Memory: {}",
                 state.speed_str(),
                 state.eta_str(),
                 elapsed_str,
