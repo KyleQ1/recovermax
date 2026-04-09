@@ -19,6 +19,7 @@ hex = "0.4"
 bytesize = "2"
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
+bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
