@@ -34,13 +34,19 @@ impl ScanReport {
         out.push_str(&format!("Filesystems found: {}\n", self.filesystems.len()));
 
         for (i, fs) in self.filesystems.iter().enumerate() {
+            let status = if fs.root_readable {
+                "browsable"
+            } else {
+                "root damaged — needs --deep scan"
+            };
             out.push_str(&format!(
-                "  [{}] {} at offset {} — {} ({})\n",
+                "  [{}] {} at offset {} — {} ({}) [{}]\n",
                 i,
                 fs.fs_type,
                 bytesize::ByteSize(fs.offset),
                 fs.label,
                 bytesize::ByteSize(fs.total_size),
+                status,
             ));
         }
 

@@ -235,6 +235,12 @@ fn parse_superblock_at_offset(reader: &dyn DiskRead, sb_offset: u64) -> Result<E
 pub fn detect(reader: &dyn DiskRead, offset: u64) -> Option<FsInfo> {
     let sb = parse_superblock(reader, offset).ok()?;
 
+    // Check if root inode (inode 2) is readable
+    let root_readable = Ext4Fs::new(reader, offset)
+        .ok()
+        .and_then(|ext4| ext4.read_inode(2).ok())
+        .is_some();
+
     Some(FsInfo {
         fs_type: "ext4".to_string(),
         label: sb.volume_name.clone(),
@@ -243,6 +249,7 @@ pub fn detect(reader: &dyn DiskRead, offset: u64) -> Option<FsInfo> {
         total_size: sb.total_size(),
         offset,
         lvm_map: None,
+        root_readable,
     })
 }
 

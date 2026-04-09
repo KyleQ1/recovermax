@@ -15,8 +15,17 @@ pub struct FsInfo {
     pub offset: u64,
     /// LVM segment map for multi-segment LVs. When present, the filesystem
     /// lives inside an LV and `offset` is the disk offset of PE 0.
+    /// LVM segment map for multi-segment LVs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lvm_map: Option<LvmMap>,
+    /// Whether the root directory (inode 2) is readable.
+    /// False means the filesystem needs --deep scan to browse.
+    #[serde(default = "default_true")]
+    pub root_readable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// LVM segment map describing how an LV maps to physical disk offsets.

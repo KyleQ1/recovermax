@@ -2086,6 +2086,23 @@ fn live_resolve_node(
         bail!("numeric node ids require a persisted session tree; use a path instead");
     }
 
+    // Check if root is readable before attempting
+    let fs_info = session
+        .artifact()
+        .filesystem_session(filesystem_index)
+        .map(|fs| &fs.fs_info);
+    if let Some(info) = fs_info {
+        if !info.root_readable {
+            bail!(
+                "Filesystem {} has a damaged root directory (block group 0 overwritten).\n\
+                 This filesystem requires a deep scan to recover files.\n\
+                 Use: recovermax scan --deep {} -o session.scn",
+                filesystem_index,
+                session.artifact().source.path.display()
+            );
+        }
+    }
+
     let ext4 = live_ext4(session, filesystem_index)?;
     let normalized = normalize_session_path(target);
     if normalized == "/" {

@@ -112,6 +112,7 @@ pub fn detect(reader: &ImageReader, offset: u64) -> Option<FsInfo> {
         total_size: bs.total_size(),
         offset,
         lvm_map: None,
+        root_readable: true,
     })
 }
 
