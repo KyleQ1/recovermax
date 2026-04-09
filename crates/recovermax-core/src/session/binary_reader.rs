@@ -46,6 +46,14 @@ impl ScnReader {
         self.header.is_complete()
     }
 
+    pub fn last_scanned_group(&self) -> u32 {
+        self.header.last_scanned_group
+    }
+
+    pub fn last_scanned_offset(&self) -> u64 {
+        self.header.last_scanned_offset()
+    }
+
     pub fn node_count(&self) -> u64 {
         self.header.node_count
     }

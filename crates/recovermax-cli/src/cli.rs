@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,10 @@ pub enum Command {
         /// Only detect specific filesystem types (comma-separated: ext4,ntfs)
         #[arg(long, value_delimiter = ',')]
         fs_type: Vec<String>,
+
+        /// Resume an interrupted scan from an existing .scn file
+        #[arg(long)]
+        resume: bool,
     },
 
     /// List filesystems from a session artifact or live scan
@@ -340,7 +345,8 @@ pub fn run(args: Args) -> Result<()> {
             end,
             file_types,
             fs_type,
-        } => run_scan(&image, output, deep_scan, start, end, file_types, fs_type),
+            resume,
+        } => run_scan(&image, output, deep_scan, start, end, file_types, fs_type, resume),
         Command::Filesystems {
             image,
             scan_file,
@@ -966,10 +972,56 @@ fn run_scan(
     end: Option<String>,
     file_types: Vec<String>,
     fs_type: Vec<String>,
+    resume: bool,
 ) -> Result<()> {
     let reader = ImageReader::open(image)?;
 
     let output = maybe_prompt_for_scn(image, reader.len(), output)?;
+
+    // Overwrite protection
+    if let Some(ref path) = output {
+        if path.exists() && !resume {
+            eprint!(
+                "Session file {} already exists. Overwrite? (y/N): ",
+                path.display()
+            );
+            std::io::stderr().flush()?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Scan cancelled.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Resume: check existing .scn and set start offset to continue from where we left off
+    let mut resume_offset: Option<u64> = None;
+    if resume {
+        if let Some(ref path) = output {
+            if path.exists() && is_binary_scn(path) {
+                let scn = recovermax_core::session::binary_reader::ScnReader::open(path)?;
+                if scn.is_complete() {
+                    println!(
+                        "Session {} is already complete ({} nodes). Nothing to resume.",
+                        path.display(),
+                        scn.node_count()
+                    );
+                    return Ok(());
+                }
+                let last_offset = scn.last_scanned_offset();
+                println!(
+                    "Resuming from {} ({} nodes found, last offset {})...",
+                    path.display(),
+                    scn.node_count(),
+                    bytesize::ByteSize(last_offset),
+                );
+                if last_offset > 0 {
+                    resume_offset = Some(last_offset);
+                }
+            }
+        }
+    }
 
     // Terminal width for block map
     let term_width = console::Term::stdout().size().1 as usize;
@@ -1000,7 +1052,7 @@ fn run_scan(
 
     let options = ScanOptions {
         deep_scan,
-        start_offset: start.as_deref().map(parse_byte_offset).transpose()?,
+        start_offset: resume_offset.or(start.as_deref().map(parse_byte_offset).transpose()?),
         end_offset: end.as_deref().map(parse_byte_offset).transpose()?,
         fs_type_filter: fs_type,
         file_type_filter: file_types,
@@ -1169,14 +1221,93 @@ fn open_session(
     // Check for binary .scn format
     if let Some(scan_file) = scan_file {
         if is_binary_scn(scan_file) {
-            // Binary .scn — use ScnReader for mmap access
-            let scn_reader = recovermax_core::session::binary_reader::ScnReader::open(scan_file)?;
-            tracing::info!(
-                "Opened binary .scn: {} nodes",
-                scn_reader.node_count()
+            let scn_reader =
+                recovermax_core::session::binary_reader::ScnReader::open(scan_file)?;
+
+            // Validate image size matches
+            if let Some(meta_json) = scn_reader.metadata_json() {
+                if let Ok(report) = serde_json::from_str::<recovermax_core::scan::ScanReport>(meta_json) {
+                    if report.image_size != reader.len() {
+                        eprintln!(
+                            "Warning: Session was created from a {} image but this image is {}.",
+                            bytesize::ByteSize(report.image_size),
+                            bytesize::ByteSize(reader.len()),
+                        );
+                    }
+                }
+            }
+
+            // Build a RecoverySessionArtifact from the binary reader
+            let node_count = scn_reader.node_count();
+            println!(
+                "Loaded binary session: {} nodes from {}",
+                node_count,
+                scan_file.display()
             );
-            // For now, fall through to legacy path by loading into memory
-            // TODO: add SessionBackend::Binary path for true zero-copy
+
+            // Convert binary nodes to SessionNode vec for the existing session system
+            // This is O(n) but avoids rewriting all downstream code
+            let mut fs_nodes: HashMap<u16, Vec<SessionNode>> = HashMap::new();
+            for i in 0..node_count as u32 {
+                if let Some(node) = scn_reader.to_session_node(i) {
+                    fs_nodes
+                        .entry(scn_reader.get_compact_node(i).unwrap().filesystem_index)
+                        .or_default()
+                        .push(node);
+                }
+            }
+
+            // Build artifact from binary data
+            let report = if let Some(meta_json) = scn_reader.metadata_json() {
+                serde_json::from_str(meta_json).unwrap_or_else(|_| {
+                    recovermax_core::scan::ScanReport {
+                        image_size: reader.len(),
+                        partitions: Vec::new(),
+                        filesystems: Vec::new(),
+                    }
+                })
+            } else {
+                recovermax_core::scan::ScanReport {
+                    image_size: reader.len(),
+                    partitions: Vec::new(),
+                    filesystems: Vec::new(),
+                }
+            };
+
+            let warnings: Vec<String> = scn_reader
+                .warnings_json()
+                .and_then(|w| serde_json::from_str(w).ok())
+                .unwrap_or_default();
+
+            let mut filesystems = Vec::new();
+            for (i, fs_info) in report.filesystems.iter().enumerate() {
+                let nodes = fs_nodes.remove(&(i as u16)).unwrap_or_default();
+                let root_node_id = nodes.first().map(|n| n.id);
+                filesystems.push(FilesystemSessionArtifact {
+                    filesystem_index: i,
+                    fs_info: fs_info.clone(),
+                    root_node_id,
+                    warnings: warnings.clone(),
+                    nodes,
+                });
+            }
+
+            let artifact = RecoverySessionArtifact {
+                version: RecoverySessionArtifact::VERSION,
+                source: recovermax_core::session::ScanImageSource {
+                    path: image.to_path_buf(),
+                    image_size: reader.len(),
+                },
+                report,
+                filesystems,
+            };
+
+            let explicit_budget = parse_memory_budget(memory_budget)?;
+            return Ok(RecoverySession::from_artifact_with_reader(
+                artifact,
+                reader,
+                explicit_budget,
+            ));
         }
     }
 
