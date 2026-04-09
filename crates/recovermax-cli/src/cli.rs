@@ -1103,15 +1103,24 @@ fn run_scan(
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
 
+        // Hide block map and switch progress bar to entry-count style
+        block_bar.finish_and_clear();
+        progress_bar.set_style(
+            ProgressStyle::with_template(
+                " {spinner:.green} {bar:40.cyan/blue} {pos}/{len}{msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+
         let tree_callback = move |event: ScanEvent| {
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
-            block_bar2.set_message(state.render_block_map());
-
-            // Show progress bar with real progress (entries / total_inodes)
+            // Show progress as entries / total_inodes (expand if we exceed estimate)
             if state.phase_total_bytes > 0 {
-                progress_bar2.set_length(state.phase_total_bytes);
+                let total = state.phase_total_bytes.max(state.bytes_scanned);
+                progress_bar2.set_length(total);
                 progress_bar2.set_position(state.bytes_scanned);
             }
 
@@ -1124,20 +1133,26 @@ fn run_scan(
                 format!("{}s", elapsed)
             };
 
-            let mem = state.bytes_scanned * 64; // ~64 bytes per CompactNode
+            let pct = if state.phase_total_bytes > 0 {
+                format!(" ({:.1}%)", state.bytes_scanned as f64 / state.phase_total_bytes as f64 * 100.0)
+            } else {
+                String::new()
+            };
 
             progress_bar2.set_message(format!(
-                " | Building file tree{}{} | Elapsed: {} | {}",
+                " | Building file tree: {} / {} inodes{}{}{} | Elapsed: {}",
+                state.bytes_scanned,
+                state.phase_total_bytes,
+                pct,
                 state.speed_str(),
                 state.eta_str(),
                 elapsed_str,
-                bytesize::ByteSize(mem),
             ));
 
             stats_bar2.set_message(format!(
-                "Filesystems: {} | Entries: {}",
+                "Filesystems: {} | Memory: {}",
                 state.fs_summary(),
-                state.bytes_scanned,
+                bytesize::ByteSize(state.bytes_scanned * 64),
             ));
         };
 
