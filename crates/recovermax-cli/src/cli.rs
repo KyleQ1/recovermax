@@ -979,11 +979,11 @@ fn run_scan(
     image: &Path,
     output: Option<PathBuf>,
     deep_scan: bool,
-    start: Option<String>,
-    end: Option<String>,
-    file_types: Vec<String>,
-    fs_type: Vec<String>,
-    resume: bool,
+    _start: Option<String>,
+    _end: Option<String>,
+    _file_types: Vec<String>,
+    _fs_type: Vec<String>,
+    _resume: bool,
 ) -> Result<()> {
     let reader = ImageReader::open(image)?;
 
@@ -991,7 +991,7 @@ fn run_scan(
 
     // Overwrite protection
     if let Some(ref path) = output {
-        if path.exists() && !resume {
+        if path.exists() {
             eprint!(
                 "Session file {} already exists. Overwrite? (y/N): ",
                 path.display()
@@ -1006,176 +1006,27 @@ fn run_scan(
         }
     }
 
-    // Resume: check existing .scn and set start offset to continue from where we left off
-    let mut resume_offset: Option<u64> = None;
-    if resume {
-        if let Some(ref path) = output {
-            if path.exists() && is_binary_scn(path) {
-                let scn = recovermax_core::session::binary_reader::ScnReader::open(path)?;
-                if scn.is_complete() {
-                    println!(
-                        "Session {} is already complete ({} nodes). Nothing to resume.",
-                        path.display(),
-                        scn.node_count()
-                    );
-                    return Ok(());
-                }
-                let last_offset = scn.last_scanned_offset();
-                println!(
-                    "Resuming from {} ({} nodes found, last offset {})...",
-                    path.display(),
-                    scn.node_count(),
-                    bytesize::ByteSize(last_offset),
-                );
-                if last_offset > 0 {
-                    resume_offset = Some(last_offset);
-                }
-            }
-        }
-    }
-
-    // Terminal width for block map
-    let term_width = console::Term::stdout().size().1 as usize;
-    let map_width = term_width.min(120).max(40);
-
-    let display = Arc::new(Mutex::new(ScanDisplay::new(reader.len(), map_width)));
-    let mp = MultiProgress::new();
-
-    let block_bar = mp.add(ProgressBar::new(0));
-    block_bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
-
-    let progress_bar = mp.add(ProgressBar::new(100));
-    progress_bar.set_style(
-        ProgressStyle::with_template(
-            " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes}{msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-
-    let stats_bar = mp.add(ProgressBar::new_spinner());
-    stats_bar.set_style(ProgressStyle::with_template(" {spinner:.green} {msg}").unwrap());
-
-    let display_clone = Arc::clone(&display);
-    let block_bar_clone = block_bar.clone();
-    let progress_bar_clone = progress_bar.clone();
-    let stats_bar_clone = stats_bar.clone();
-
+    // Quick scan: find partitions + filesystems (no tree building)
     let options = ScanOptions {
         deep_scan,
-        start_offset: resume_offset.or(start.as_deref().map(parse_byte_offset).transpose()?),
-        end_offset: end.as_deref().map(parse_byte_offset).transpose()?,
-        fs_type_filter: fs_type,
-        file_type_filter: file_types,
-        on_event: Some(Box::new(move |event| {
-            let mut state = display_clone.lock().unwrap();
-            state.handle_event(&event);
-
-            block_bar_clone.set_message(state.render_block_map());
-
-            progress_bar_clone.set_length(state.phase_total_bytes);
-            progress_bar_clone.set_position(state.bytes_scanned);
-            progress_bar_clone.set_message(format!(
-                " | {}{}{}",
-                state.phase_name(),
-                state.speed_str(),
-                state.eta_str(),
-            ));
-
-            stats_bar_clone.set_message(format!(
-                "Filesystems: {} | File signatures: {}",
-                state.fs_summary(),
-                state.file_types_found,
-            ));
-        })),
         ..Default::default()
     };
-
     let scanner = Scanner::new(&reader);
     let report = scanner.full_scan_with_options(&options)?;
 
-    if let Some(path) = output {
-        // Transition display to tree building phase — same bars, no gap
-        {
-            let mut state = display.lock().unwrap();
-            state.current_phase = ScanPhase::TreeBuilding;
-            state.bytes_scanned = 0;
-            state.phase_start_time = Instant::now();
-        }
+    println!("{}", report.summary());
 
-        let display_clone2 = Arc::clone(&display);
-        let block_bar2 = block_bar.clone();
-        let progress_bar2 = progress_bar.clone();
-        let stats_bar2 = stats_bar.clone();
-
-        // Hide block map and switch progress bar to bytes style for tree building
-        block_bar.finish_and_clear();
-        progress_bar.set_style(
-            ProgressStyle::with_template(
-                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes}{msg}",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
-        );
-
-        let tree_callback = move |event: ScanEvent| {
-            let mut state = display_clone2.lock().unwrap();
-            state.handle_event(&event);
-
-            // Progress bar in bytes (image_size total)
-            let total = state.image_size;
-            let scanned = (state.bytes_scanned * 256).min(total);
-            progress_bar2.set_length(total);
-            progress_bar2.set_position(scanned);
-
-            let elapsed = state.phase_start_time.elapsed().as_secs();
-            let elapsed_str = if elapsed >= 3600 {
-                format!("{}h{}m", elapsed / 3600, (elapsed % 3600) / 60)
-            } else if elapsed >= 60 {
-                format!("{}m{}s", elapsed / 60, elapsed % 60)
-            } else {
-                format!("{}s", elapsed)
-            };
-
-            progress_bar2.set_message(format!(
-                " | Building tree{}{} | Elapsed: {} | {} entries | Memory: {}",
-                state.speed_str(),
-                state.eta_str(),
-                elapsed_str,
-                state.bytes_scanned,
-                bytesize::ByteSize(state.bytes_scanned * 64),
-            ));
-
-            stats_bar2.set_message(format!(
-                "Filesystems: {}",
-                state.fs_summary(),
-            ));
-        };
-
-        // Use binary .scn format for efficient storage
-        RecoverySessionArtifact::build_binary_scn(
-            image,
-            &reader,
-            &report,
-            &path,
-            Some(&tree_callback),
-        )?;
-
-        // NOW clear everything and print final summary
-        block_bar.finish_and_clear();
-        progress_bar.finish_and_clear();
-        stats_bar.finish_and_clear();
-
-        println!("{}", report.summary());
+    // Save lightweight .scn (just partition/filesystem metadata — no inode tree)
+    if let Some(ref path) = output {
+        let artifact = RecoverySessionArtifact::from_report(image, report);
+        artifact.save_to_path(path)?;
         println!("Session saved to {}", path.display());
-    } else {
-        // No output file — just print summary
-        block_bar.finish_and_clear();
-        progress_bar.finish_and_clear();
-        stats_bar.finish_and_clear();
-
-        println!("{}", report.summary());
     }
+
+    println!("\nBrowse filesystems on demand:");
+    println!("  recovermax ls {} --fs 0", image.display());
+    println!("  recovermax search {} \"*.txt\"", image.display());
+    println!("  recovermax recover {} -d ./output/ -p /home", image.display());
 
     Ok(())
 }
