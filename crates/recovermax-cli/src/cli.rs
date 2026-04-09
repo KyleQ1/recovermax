@@ -1069,10 +1069,12 @@ fn run_scan(
             ));
         };
 
-        let artifact = RecoverySessionArtifact::from_scan_with_callback(
+        // Use binary .scn format for efficient storage
+        RecoverySessionArtifact::build_binary_scn(
             image,
             &reader,
-            report.clone(),
+            &report,
+            &path,
             Some(&tree_callback),
         )?;
 
@@ -1082,8 +1084,6 @@ fn run_scan(
         stats_bar.finish_and_clear();
 
         println!("{}", report.summary());
-
-        artifact.save_to_path(&path)?;
         println!("Session saved to {}", path.display());
     } else {
         // No output file — just print summary
@@ -1150,6 +1150,14 @@ fn select_deleted_filesystem(
     }
 }
 
+fn is_binary_scn(path: &Path) -> bool {
+    if let Ok(data) = std::fs::read(path) {
+        data.len() >= 8 && &data[0..8] == b"RMXSCAN\0"
+    } else {
+        false
+    }
+}
+
 fn open_session(
     image: &Path,
     scan_file: Option<&Path>,
@@ -1157,6 +1165,21 @@ fn open_session(
     require_tree: bool,
 ) -> Result<RecoverySession> {
     let reader = ImageReader::open(image)?;
+
+    // Check for binary .scn format
+    if let Some(scan_file) = scan_file {
+        if is_binary_scn(scan_file) {
+            // Binary .scn — use ScnReader for mmap access
+            let scn_reader = recovermax_core::session::binary_reader::ScnReader::open(scan_file)?;
+            tracing::info!(
+                "Opened binary .scn: {} nodes",
+                scn_reader.node_count()
+            );
+            // For now, fall through to legacy path by loading into memory
+            // TODO: add SessionBackend::Binary path for true zero-copy
+        }
+    }
+
     let mut artifact = if let Some(scan_file) = scan_file {
         let artifact = RecoverySessionArtifact::load_from_path(scan_file)?;
         artifact.validate_for_image_with_artifact_path(image, reader.len(), Some(scan_file))?;

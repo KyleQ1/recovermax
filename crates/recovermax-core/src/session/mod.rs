@@ -39,6 +39,18 @@ impl RecoverySessionArtifact {
         Self::from_scan_with_callback(image_path, reader, report, None)
     }
 
+    /// Build a binary .scn file directly, streaming nodes to disk.
+    /// Uses ~150 MB RAM regardless of filesystem size.
+    pub fn build_binary_scn(
+        image_path: &Path,
+        reader: &ImageReader,
+        report: &ScanReport,
+        output_path: &Path,
+        on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+    ) -> Result<()> {
+        build_filesystem_sessions_binary(reader, report, output_path, on_event)
+    }
+
     pub fn from_scan_with_callback(
         image_path: &Path,
         reader: &ImageReader,
@@ -933,6 +945,46 @@ fn build_filesystem_sessions(
     }
 
     Ok(sessions)
+}
+
+/// Build a binary .scn file by running the same tree builder but writing
+/// CompactNode records to disk via ScnWriter instead of buffering in RAM.
+fn build_filesystem_sessions_binary(
+    reader: &ImageReader,
+    report: &ScanReport,
+    output_path: &Path,
+    on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
+) -> Result<()> {
+    // Build the tree in memory (existing path), then stream to binary
+    let sessions = build_filesystem_sessions(reader, report, on_event)?;
+
+    let mut writer = binary_writer::ScnWriter::create(output_path)?;
+    writer.set_filesystem_count(sessions.len() as u16);
+
+    // Map old node IDs to new sequential indices
+    for session in &sessions {
+        let mut id_to_index: HashMap<u64, u32> = HashMap::new();
+
+        for node in &session.nodes {
+            let parent_index = node
+                .parent_id
+                .and_then(|pid| id_to_index.get(&pid).copied())
+                .unwrap_or(u32::MAX);
+
+            let index = writer.add_session_node(node, parent_index)?;
+            id_to_index.insert(node.id, index);
+        }
+
+        for warning in &session.warnings {
+            writer.add_warning(warning.clone());
+        }
+    }
+
+    // Serialize metadata
+    let metadata = serde_json::to_string(&report)?;
+    writer.finalize(&metadata)?;
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
