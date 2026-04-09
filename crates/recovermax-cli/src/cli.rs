@@ -989,7 +989,7 @@ fn run_scan(
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Scan cancelled.");
+                println!("Scan cancelled. Use --resume to continue from the existing scan.");
                 return Ok(());
             }
         }
