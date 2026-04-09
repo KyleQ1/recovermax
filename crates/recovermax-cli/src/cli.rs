@@ -1014,18 +1014,45 @@ fn run_scan(
 
     println!("{}", report.summary());
 
-    // Save metadata-only .scn (partition + filesystem locations).
-    // Directory tree is NOT built during scan — it's read on-demand during
-    // browse (ls/tree/search). This keeps scan fast (~5s) and low RAM (~50 MB).
+    // Phase 2: Build directory tree for browsable filesystems.
+    // Walks directories from root (NOT all inode slots). For healthy filesystems
+    // this is fast and low RAM. Damaged root filesystems are skipped.
+    // madvise(Sequential) on the mmap prevents page cache bloat.
     if let Some(ref path) = output {
-        save_metadata_scn(&report, path)?;
-        let fs_count = report.filesystems.len();
-        println!(
-            "Session saved to {} ({} filesystem{}, browse on-demand)",
-            path.display(),
-            fs_count,
-            if fs_count == 1 { "" } else { "s" },
-        );
+        println!("Building directory tree...");
+
+        let start_time = Instant::now();
+
+        let callback = move |event: ScanEvent| {
+            match &event {
+                ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
+                    if (files_found + dirs_found) % 50000 == 0 {
+                        let elapsed = start_time.elapsed().as_secs();
+                        eprint!(
+                            "\r  {} files, {} dirs found ({elapsed}s)    ",
+                            files_found, dirs_found,
+                        );
+                    }
+                }
+                ScanEvent::TreeBuildStarted { label, .. } => {
+                    eprintln!("  Scanning {}...", label);
+                }
+                ScanEvent::TreeBuildComplete { total_nodes, .. } => {
+                    eprintln!("\r  {} nodes indexed.              ", total_nodes);
+                }
+                _ => {}
+            }
+        };
+
+        RecoverySessionArtifact::build_binary_scn(
+            image,
+            &reader,
+            &report,
+            path,
+            Some(&callback),
+        )?;
+
+        println!("Session saved to {}", path.display());
         println!("\nBrowse with:");
         println!("  recovermax ls {} -s {} --fs 0", image.display(), path.display());
         println!("  recovermax search {} \"keyword\" -s {}", image.display(), path.display());
