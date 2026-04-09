@@ -31,6 +31,17 @@ impl CompactTree {
         }
     }
 
+    /// Create with pre-allocated capacity for the expected number of nodes.
+    pub fn with_capacity(estimated_nodes: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(estimated_nodes),
+            string_table: Vec::with_capacity(1024 * 1024), // 1 MB initial for string table
+            string_intern: HashMap::with_capacity(estimated_nodes.min(100_000)), // cap interning
+            warnings: Vec::new(),
+            filesystem_count: 0,
+        }
+    }
+
     /// Intern a basename string, returning (offset, len).
     pub fn intern_basename(&mut self, basename: &str) -> (u32, u16) {
         if let Some(&offset) = self.string_intern.get(basename) {
@@ -99,7 +110,8 @@ impl CompactTree {
             + self.warnings.iter().map(|w| w.len()).sum::<usize>()
     }
 
-    /// Get basename for a node.
+    /// Get basename for a node. Returns "$" sentinel for orphan inodes
+    /// (callers should check and reconstruct as "File-{inode}" for display).
     pub fn basename_str(&self, node: &CompactNode) -> &str {
         let start = node.basename_offset as usize;
         let end = start + node.basename_len as usize;
@@ -109,9 +121,23 @@ impl CompactTree {
         std::str::from_utf8(&self.string_table[start..end]).unwrap_or("?")
     }
 
+    /// Get display basename — resolves "$" sentinel to "File-{inode}".
+    pub fn display_basename(&self, node: &CompactNode) -> String {
+        let raw = self.basename_str(node);
+        if raw == "$" && node.inode != 0 {
+            if node.deleted() {
+                format!("OrphanFile-{}", node.inode)
+            } else {
+                format!("File-{}", node.inode)
+            }
+        } else {
+            raw.to_string()
+        }
+    }
+
     /// Compute path for a node by walking parent chain.
     pub fn compute_path(&self, node_index: u32) -> String {
-        let mut segments: Vec<&str> = Vec::new();
+        let mut segments: Vec<String> = Vec::new();
         let mut current = node_index;
         let mut depth = 0u32;
 
@@ -120,7 +146,7 @@ impl CompactTree {
                 break;
             }
             let node = &self.nodes[current as usize];
-            let basename = self.basename_str(node);
+            let basename = self.display_basename(node);
             if basename == "/" || !node.has_parent() {
                 break;
             }
@@ -140,7 +166,7 @@ impl CompactTree {
     /// Convert a node to SessionNode (allocates strings on demand).
     pub fn to_session_node(&self, index: u32) -> Option<SessionNode> {
         let node = self.nodes.get(index as usize)?;
-        let basename = self.basename_str(node).to_string();
+        let basename = self.display_basename(node);
         let path = self.compute_path(index);
 
         Some(SessionNode {

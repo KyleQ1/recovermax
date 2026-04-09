@@ -958,7 +958,18 @@ fn build_filesystem_sessions_binary(
     output_path: &Path,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
-    let mut tree = compact_tree::CompactTree::new();
+    // Pre-allocate based on total inodes across all filesystems
+    let total_inodes: usize = report
+        .filesystems
+        .iter()
+        .filter(|f| f.fs_type == "ext4")
+        .filter_map(|f| {
+            Ext4Fs::new(reader, f.offset)
+                .ok()
+                .map(|ext4| ext4.superblock.inodes_count as usize)
+        })
+        .sum();
+    let mut tree = compact_tree::CompactTree::with_capacity(total_inodes);
     tree.filesystem_count = report.filesystems.len() as u16;
 
     for (filesystem_index, fs_info) in report.filesystems.iter().enumerate() {
@@ -1051,14 +1062,17 @@ fn build_filesystem_sessions_binary(
             );
         }
 
-        // Deleted orphan scan
-        append_ext4_deleted_orphans_compact(
-            &ext4,
-            filesystem_index as u16,
-            root_idx,
-            &mut tree,
-            &journal_hints,
-        );
+        // Only run deleted orphan scan if we didn't already do a full inode scan
+        // (the full inode scan already finds all deleted inodes)
+        if root_inode_ok.is_some() {
+            append_ext4_deleted_orphans_compact(
+                &ext4,
+                filesystem_index as u16,
+                root_idx,
+                &mut tree,
+                &journal_hints,
+            );
+        }
     }
 
     // Save to binary .scn
@@ -1134,7 +1148,7 @@ fn build_ext4_subtree_compact(
 
         // Progress callback every 500 nodes
         if let Some(cb) = on_event {
-            if tree.node_count() % 500 == 0 {
+            if tree.node_count() % 50000 == 0 {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: filesystem_index as usize,
                     files_found: tree.node_count(),
@@ -1190,7 +1204,9 @@ fn append_ext4_all_inodes_compact(
     );
 
     let mut found = 0usize;
-    let mut seen = HashSet::new();
+    // Bitmap: 1 bit per inode. 122M inodes = 15 MB instead of 6.8 GB HashSet.
+    let total_inodes = ext4.superblock.inodes_count as usize;
+    let mut seen = vec![0u8; total_inodes / 8 + 1];
 
     for group in 0..num_groups {
         let bg = match ext4.read_group_descriptor(group) {
@@ -1217,7 +1233,11 @@ fn append_ext4_all_inodes_compact(
                 }
 
                 let inode_num = group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
-                if inode_num <= 10 || !seen.insert(inode_num) {
+                let ino = inode_num as usize;
+                if inode_num <= 10
+                    || ino >= total_inodes
+                    || (seen[ino / 8] & (1 << (ino % 8))) != 0
+                {
                     continue;
                 }
 
@@ -1245,6 +1265,9 @@ fn append_ext4_all_inodes_compact(
                     continue;
                 }
 
+                // Mark as seen in bitmap
+                seen[ino / 8] |= 1 << (ino % 8);
+
                 let is_deleted = dtime != 0 || links_count == 0;
                 let file_type = match mode & 0xF000 {
                     0x4000 => FileType::Directory,
@@ -1253,20 +1276,16 @@ fn append_ext4_all_inodes_compact(
                     _ => continue,
                 };
 
+                // Use journal-recovered name if available, otherwise use a
+                // fixed sentinel that deduplicates in the string table.
+                // The reader reconstructs "File-{inode}" on demand.
                 let basename = journal_hints
                     .get(&inode_num)
                     .map(|s| s.as_str())
-                    .unwrap_or_else(|| if is_deleted { "OrphanFile" } else { "File" });
-
-                // Use inode number in name to make it unique
-                let full_name = if basename == "OrphanFile" || basename == "File" {
-                    format!("{}-{}", basename, inode_num)
-                } else {
-                    basename.to_string()
-                };
+                    .unwrap_or("$");
 
                 tree.add_node(
-                    inode_num, recovered_dir, &full_name, filesystem_index,
+                    inode_num, recovered_dir, basename, filesystem_index,
                     file_type, is_deleted,
                     if is_deleted { EntrySource::SyntheticOrphan } else { EntrySource::Filesystem },
                     size, 0, ctime, mtime, atime, dtime,
@@ -1275,7 +1294,7 @@ fn append_ext4_all_inodes_compact(
                 found += 1;
 
                 if let Some(cb) = on_event {
-                    if found % 500 == 0 {
+                    if found % 50000 == 0 {
                         cb(crate::scan::ScanEvent::TreeBuildProgress {
                             filesystem_index: filesystem_index as usize,
                             files_found: found,
@@ -1412,7 +1431,7 @@ fn build_ext4_subtree(
 
         // Emit tree build progress every 500 nodes
         if let Some(cb) = on_event {
-            if nodes.len() % 500 == 0 {
+            if nodes.len() % 50000 == 0 {
                 let dirs = nodes.iter().filter(|n| n.file_type == FileType::Directory).count();
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index,
@@ -1608,7 +1627,7 @@ fn append_ext4_all_inodes(
                 found_count += 1;
 
                 if let Some(cb) = on_event {
-                    if found_count % 500 == 0 {
+                    if found_count % 50000 == 0 {
                         cb(crate::scan::ScanEvent::TreeBuildProgress {
                             filesystem_index,
                             files_found: found_count,
