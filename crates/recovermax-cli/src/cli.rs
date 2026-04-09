@@ -873,7 +873,11 @@ impl ScanDisplay {
             return String::new();
         }
         let speed = self.bytes_scanned as f64 / elapsed;
-        format!(" @ {}/s", bytesize::ByteSize(speed as u64))
+        if self.current_phase == ScanPhase::TreeBuilding {
+            format!(" @ {:.0} entries/s", speed)
+        } else {
+            format!(" @ {}/s", bytesize::ByteSize(speed as u64))
+        }
     }
 
     fn eta_str(&self) -> String {
@@ -1097,27 +1101,27 @@ fn run_scan(
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
 
-        // Switch progress bar to spinner style for tree building
-        progress_bar.set_style(
-            ProgressStyle::with_template(" {spinner:.green} {msg}").unwrap(),
-        );
-
+        // Keep the progress bar style but switch to entry counting for tree building
         let tree_callback = move |event: ScanEvent| {
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
             block_bar2.set_message(state.render_block_map());
 
+            progress_bar2.set_length(0);
+            progress_bar2.set_position(0);
             progress_bar2.set_message(format!(
-                "Building file tree: {} entries found{}",
+                " | Building file tree: {} entries{}{}",
                 state.bytes_scanned,
                 state.speed_str(),
+                state.eta_str(),
             ));
             progress_bar2.tick();
 
             stats_bar2.set_message(format!(
-                "Filesystems: {}",
+                "Filesystems: {} | Memory: {}",
                 state.fs_summary(),
+                bytesize::ByteSize(state.bytes_scanned * 64), // ~64 bytes per CompactNode
             ));
         };
 
