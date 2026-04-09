@@ -1020,7 +1020,6 @@ fn run_scan(
     // Calls drop_cache() every 100K nodes to bound RSS from mmap page cache.
     if let Some(ref path) = output {
         let image_size = reader.len();
-        let image_size_str = bytesize::ByteSize(image_size).to_string();
 
         let pb = indicatif::ProgressBar::new(image_size);
         pb.set_style(
@@ -1064,11 +1063,10 @@ fn run_scan(
                     let mem_bytes = (*files_found as u64) * 64 + (*files_found as u64 / 10) * 20;
 
                     pb_clone.set_message(format!(
-                        "| {} files, {} dirs | {:.0} entries/s{} | Elapsed: {} | Mem: {} | Image: {}",
+                        "| {} files, {} dirs | {:.0} entries/s{} | Elapsed: {} | Mem: {}",
                         files_found, dirs_found, entries_per_sec,
                         eta_str, elapsed_str,
                         bytesize::ByteSize(mem_bytes),
-                        image_size_str,
                     ));
                 }
                 ScanEvent::TreeBuildStarted { label, total_inodes, .. } => {
