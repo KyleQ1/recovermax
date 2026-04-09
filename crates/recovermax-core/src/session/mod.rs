@@ -1015,6 +1015,29 @@ fn build_filesystem_sessions_binary(
             0,
         );
 
+        // Skip tree building if estimated memory exceeds 4 GB.
+        // These filesystems need --deep (streaming to disk) instead.
+        const MAX_TREE_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
+        if estimated_memory > MAX_TREE_MEMORY {
+            tree.add_warning(format_traversal_warning(
+                "/",
+                &format!(
+                    "Filesystem has {} used inodes (~{}). Tree would use ~{} RAM. \
+                     Skipping in-memory tree build. Use --deep to stream to disk.",
+                    used_inodes,
+                    bytesize::ByteSize(fs_info.total_size),
+                    bytesize::ByteSize(estimated_memory),
+                ),
+            ));
+            if let Some(cb) = on_event {
+                cb(crate::scan::ScanEvent::TreeBuildComplete {
+                    filesystem_index,
+                    total_nodes: tree.node_count(),
+                });
+            }
+            continue;
+        }
+
         if root_inode_ok.is_some() {
             match ext4.list_directory(2) {
                 Ok(root_entries) => {
