@@ -1159,11 +1159,22 @@ fn build_ext4_subtree_compact(
         let count = tree.node_count();
         if count % 50000 == 0 {
             if let Some(cb) = on_event {
+                // Approximate byte offset from inode number for progress display.
+                // Inodes are scattered across block groups, but higher inode numbers
+                // generally correspond to higher disk offsets.
+                let inode_frac = if entry.inode > 0 {
+                    entry.inode as f64 / ext4.superblock.inodes_count as f64
+                } else {
+                    0.0
+                };
+                let bytes_offset = ext4.partition_offset()
+                    + (inode_frac * ext4.superblock.total_size() as f64) as u64;
+
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: filesystem_index as usize,
                     files_found: count,
                     dirs_found: *dirs_found,
-                    bytes_offset: 0,
+                    bytes_offset,
                 });
             }
             // Drop mmap page cache every 100K nodes to keep RSS bounded.

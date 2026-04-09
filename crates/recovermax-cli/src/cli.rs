@@ -1019,12 +1019,11 @@ fn run_scan(
     // Walks directories from root (NOT all inode slots). Damaged root = skipped.
     // Calls drop_cache() every 100K nodes to bound RSS from mmap page cache.
     if let Some(ref path) = output {
-        // Progress bar total is updated per-filesystem to used_inodes.
-        // Start with 0; TreeBuildStarted sets the real total.
-        let pb = indicatif::ProgressBar::new(0);
+        let image_size = reader.len();
+        let pb = indicatif::ProgressBar::new(image_size);
         pb.set_style(
             indicatif::ProgressStyle::with_template(
-                " {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} entries {msg}",
+                " {spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}",
             )
             .unwrap()
             .progress_chars("=>-"),
@@ -1035,60 +1034,47 @@ fn run_scan(
         let pb_clone = pb.clone();
         let callback = move |event: ScanEvent| {
             match &event {
-                ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    pb_clone.set_position(*files_found as u64);
+                ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } => {
+                    pb_clone.set_position(*bytes_offset);
 
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
-                    let entries_per_sec = if elapsed_secs > 0.5 {
-                        *files_found as f64 / elapsed_secs
+                    let elapsed_str = format_duration(elapsed_secs);
+
+                    let speed = if elapsed_secs > 0.5 {
+                        *bytes_offset as f64 / elapsed_secs
                     } else {
                         0.0
                     };
 
-                    let elapsed_str = format_duration(elapsed_secs);
-
-                    // ETA based on entries found vs total expected
-                    let total = pb_clone.length().unwrap_or(0);
-                    let found = *files_found as u64;
-                    let eta_str = if entries_per_sec > 0.0 && found < total && elapsed_secs > 2.0 {
-                        let remaining = (total - found) as f64;
-                        let eta_secs = remaining / entries_per_sec;
+                    let eta_str = if speed > 0.0 && *bytes_offset > 0 && (*bytes_offset) < image_size && elapsed_secs > 2.0 {
+                        let remaining = (image_size - *bytes_offset) as f64;
+                        let eta_secs = remaining / speed;
                         format!(" | ETA: {}", format_duration(eta_secs))
                     } else {
                         String::new()
                     };
 
-                    // Memory: CompactNode tree + string table estimate
-                    let mem_bytes = found * 64 + (found / 10) * 20;
+                    let mem_bytes = (*files_found as u64) * 64 + (*files_found as u64 / 10) * 20;
 
                     pb_clone.set_message(format!(
-                        "| {} files, {} dirs | {:.0}/s{} | Elapsed: {} | Mem: {}",
-                        files_found, dirs_found, entries_per_sec,
+                        "| {}/s | {} files, {} dirs{} | Elapsed: {} | Mem: {}",
+                        bytesize::ByteSize(speed as u64),
+                        files_found, dirs_found,
                         eta_str, elapsed_str,
                         bytesize::ByteSize(mem_bytes),
                     ));
                 }
                 ScanEvent::TreeBuildStarted { label, used_inodes, estimated_memory, .. } => {
-                    // Set progress bar total to used inodes for this filesystem
-                    pb_clone.set_length(*used_inodes);
-                    pb_clone.set_position(0);
-
                     let mem_str = bytesize::ByteSize(*estimated_memory);
                     if *estimated_memory > 4 * 1024 * 1024 * 1024 {
                         pb_clone.suspend(|| {
                             eprintln!(
-                                "  Skipping {} — {} used inodes would use ~{} RAM.",
+                                "  Skipping {} — {} used inodes would use ~{} RAM. Use --deep instead.",
                                 label, format_count(*used_inodes), mem_str,
-                            );
-                            eprintln!(
-                                "  Use --deep to stream this filesystem to disk."
                             );
                         });
                     } else {
-                        pb_clone.set_message(format!(
-                            "| Scanning {} ({} entries, ~{})...",
-                            label, format_count(*used_inodes), mem_str,
-                        ));
+                        pb_clone.set_message(format!("| Scanning {}...", label));
                     }
                 }
                 ScanEvent::TreeBuildComplete { total_nodes, .. } => {

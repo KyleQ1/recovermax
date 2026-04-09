@@ -274,6 +274,11 @@ impl<'a> Ext4Fs<'a> {
         })
     }
 
+    /// Absolute disk offset where this filesystem starts.
+    pub fn partition_offset(&self) -> u64 {
+        self.partition_offset
+    }
+
     /// Get the byte offset of a block number
     fn block_offset(&self, block: u64) -> u64 {
         self.partition_offset + block * self.superblock.block_size() as u64
