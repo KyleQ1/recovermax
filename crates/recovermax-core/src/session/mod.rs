@@ -1037,14 +1037,13 @@ fn build_filesystem_sessions_binary(
 
         let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
 
+        // If root is unreadable, log it but DON'T do the full inode scan here.
+        // The full inode scan (all 122M slots) uses too much RAM for the default path.
+        // A future --deep option will handle this case properly.
         if root_inode_ok.is_none() {
-            append_ext4_all_inodes_compact(
-                &ext4,
-                filesystem_index as u16,
-                root_idx,
-                &mut tree,
-                &journal_hints,
-                on_event,
+            tracing::warn!(
+                "Filesystem {} root inode unreadable — skipping tree build for this filesystem",
+                filesystem_index
             );
         }
 
