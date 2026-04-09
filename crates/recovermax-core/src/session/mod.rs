@@ -1,4 +1,6 @@
 pub mod binary_format;
+pub mod binary_reader;
+pub mod binary_writer;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

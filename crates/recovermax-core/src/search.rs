@@ -319,12 +319,12 @@ fn path_matches_inner(
     basename.contains(query) || absolute_path.contains(query)
 }
 
-fn is_glob_query(query: &str) -> bool {
+pub fn is_glob_query(query: &str) -> bool {
     query.contains('*') || query.contains('?')
 }
 
 /// Simple glob matching with `*` (any sequence) and `?` (any single char).
-fn glob_matches(pattern: &str, text: &str) -> bool {
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (pn, tn) = (p.len(), t.len());
