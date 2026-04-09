@@ -1023,12 +1023,24 @@ fn run_scan(
         println!("Building directory tree...");
 
         let start_time = Instant::now();
-        let image_size = reader.len();
 
-        let pb = indicatif::ProgressBar::new(image_size);
+        // Use total inodes as progress denominator for ETA
+        let total_inodes: u64 = report
+            .filesystems
+            .iter()
+            .filter(|f| f.fs_type == "ext4" && f.root_readable)
+            .filter_map(|f| {
+                recovermax_core::fs::ext4::Ext4Fs::new(&reader, f.offset)
+                    .ok()
+                    .map(|ext4| ext4.superblock.inodes_count as u64)
+            })
+            .sum();
+        let pb_total = if total_inodes > 0 { total_inodes } else { reader.len() / 256 };
+
+        let pb = indicatif::ProgressBar::new(pb_total);
         pb.set_style(
             indicatif::ProgressStyle::with_template(
-                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes} {msg}",
+                " {spinner:.green} {bar:40.cyan/blue} {pos}/{len} {msg}",
             )
             .unwrap()
             .progress_chars("=>-"),
@@ -1039,29 +1051,43 @@ fn run_scan(
         let callback = move |event: ScanEvent| {
             match &event {
                 ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    let total = *files_found + *dirs_found;
-                    // Approximate progress: each entry reads ~256 bytes of inode data
-                    let bytes_read = (total as u64) * 256;
-                    pb_clone.set_position(bytes_read.min(image_size));
+                    let total = (*files_found + *dirs_found) as u64;
+                    pb_clone.set_position(total.min(pb_total));
 
-                    let elapsed = start_time.elapsed().as_secs();
-                    let elapsed_str = if elapsed >= 3600 {
-                        format!("{}h{}m", elapsed / 3600, (elapsed % 3600) / 60)
-                    } else if elapsed >= 60 {
-                        format!("{}m{}s", elapsed / 60, elapsed % 60)
+                    let elapsed_secs = start_time.elapsed().as_secs();
+                    let elapsed_str = if elapsed_secs >= 3600 {
+                        format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
+                    } else if elapsed_secs >= 60 {
+                        format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
                     } else {
-                        format!("{}s", elapsed)
+                        format!("{}s", elapsed_secs)
                     };
 
-                    let rate = if elapsed > 0 { total as u64 / elapsed } else { 0 };
+                    let rate = if elapsed_secs > 0 { total / elapsed_secs } else { 0 };
+
+                    // ETA based on entries found vs total inodes
+                    let eta_str = if rate > 0 && total < pb_total {
+                        let remaining = pb_total - total;
+                        let eta_secs = remaining / rate;
+                        if eta_secs >= 3600 {
+                            format!(" | ETA: {}h{}m", eta_secs / 3600, (eta_secs % 3600) / 60)
+                        } else if eta_secs >= 60 {
+                            format!(" | ETA: {}m{}s", eta_secs / 60, eta_secs % 60)
+                        } else {
+                            format!(" | ETA: {}s", eta_secs)
+                        }
+                    } else {
+                        String::new()
+                    };
 
                     pb_clone.set_message(format!(
-                        "| {} files, {} dirs | {}/s | Elapsed: {} | Memory: {}",
+                        "| {} files, {} dirs | {}/s | Elapsed: {}{} | Mem: {}",
                         files_found,
                         dirs_found,
                         rate,
                         elapsed_str,
-                        bytesize::ByteSize((total as u64) * 280), // ~280 bytes per SessionNode
+                        eta_str,
+                        bytesize::ByteSize(total * 64),
                     ));
                 }
                 ScanEvent::TreeBuildStarted { label, .. } => {
