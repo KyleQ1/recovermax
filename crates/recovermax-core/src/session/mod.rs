@@ -831,10 +831,15 @@ fn build_filesystem_sessions(
         let mut warnings = Vec::new();
 
         if let Some(cb) = on_event {
+            let total = ext4.superblock.inodes_count as u64;
+            let free = ext4.superblock.free_inodes_count as u64;
+            let used = total.saturating_sub(free);
             cb(crate::scan::ScanEvent::TreeBuildStarted {
                 filesystem_index,
                 label: fs_info.label.clone(),
-                total_inodes: ext4.superblock.inodes_count as u64,
+                total_inodes: total,
+                used_inodes: used,
+                estimated_memory: used * 84,
             });
         }
 
@@ -977,11 +982,19 @@ fn build_filesystem_sessions_binary(
             }
         };
 
+        let total_inodes = ext4.superblock.inodes_count as u64;
+        let free_inodes = ext4.superblock.free_inodes_count as u64;
+        let used_inodes = total_inodes.saturating_sub(free_inodes);
+        // ~84 bytes per node: 64 (CompactNode) + ~20 (string table avg)
+        let estimated_memory = used_inodes * 84;
+
         if let Some(cb) = on_event {
             cb(crate::scan::ScanEvent::TreeBuildStarted {
                 filesystem_index,
                 label: fs_info.label.clone(),
-                total_inodes: ext4.superblock.inodes_count as u64,
+                total_inodes,
+                used_inodes,
+                estimated_memory,
             });
         }
 

@@ -71,7 +71,7 @@ pub enum ScanEvent {
     FilesystemFound { fs_type: String, label: String, offset: u64, size: u64 },
     FileTypeFound { file_type: String, offset: u64 },
     PhaseComplete { phase: ScanPhase, filesystems_found: usize },
-    TreeBuildStarted { filesystem_index: usize, label: String, total_inodes: u64 },
+    TreeBuildStarted { filesystem_index: usize, label: String, total_inodes: u64, used_inodes: u64, estimated_memory: u64 },
     TreeBuildProgress { filesystem_index: usize, files_found: usize, dirs_found: usize, bytes_offset: u64 },
     TreeBuildComplete { filesystem_index: usize, total_nodes: usize },
 }

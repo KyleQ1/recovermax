@@ -1069,11 +1069,22 @@ fn run_scan(
                         bytesize::ByteSize(mem_bytes),
                     ));
                 }
-                ScanEvent::TreeBuildStarted { label, total_inodes, .. } => {
+                ScanEvent::TreeBuildStarted { label, used_inodes, estimated_memory, .. } => {
+                    let mem_str = bytesize::ByteSize(*estimated_memory);
+                    if *estimated_memory > 4 * 1024 * 1024 * 1024 {
+                        pb_clone.suspend(|| {
+                            eprintln!(
+                                "  Warning: {} has {} used inodes — tree will use ~{}",
+                                label, format_count(*used_inodes), mem_str,
+                            );
+                            eprintln!(
+                                "  Consider using --deep to stream results to disk instead."
+                            );
+                        });
+                    }
                     pb_clone.set_message(format!(
-                        "| Scanning {} ({} inodes)...",
-                        label,
-                        format_count(*total_inodes),
+                        "| Scanning {} ({} inodes, ~{})...",
+                        label, format_count(*used_inodes), mem_str,
                     ));
                 }
                 ScanEvent::TreeBuildComplete { total_nodes, .. } => {
