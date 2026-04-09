@@ -1023,24 +1023,12 @@ fn run_scan(
         println!("Building directory tree...");
 
         let start_time = Instant::now();
+        let image_size = reader.len();
 
-        // Use total inodes as progress denominator for ETA
-        let total_inodes: u64 = report
-            .filesystems
-            .iter()
-            .filter(|f| f.fs_type == "ext4" && f.root_readable)
-            .filter_map(|f| {
-                recovermax_core::fs::ext4::Ext4Fs::new(&reader, f.offset)
-                    .ok()
-                    .map(|ext4| ext4.superblock.inodes_count as u64)
-            })
-            .sum();
-        let pb_total = if total_inodes > 0 { total_inodes } else { reader.len() / 256 };
-
-        let pb = indicatif::ProgressBar::new(pb_total);
+        let pb = indicatif::ProgressBar::new(image_size);
         pb.set_style(
             indicatif::ProgressStyle::with_template(
-                " {spinner:.green} {bar:40.cyan/blue} {pos}/{len} {msg}",
+                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes} {msg}",
             )
             .unwrap()
             .progress_chars("=>-"),
@@ -1051,24 +1039,29 @@ fn run_scan(
         let callback = move |event: ScanEvent| {
             match &event {
                 ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    let total = (*files_found + *dirs_found) as u64;
-                    pb_clone.set_position(total.min(pb_total));
+                    let total_entries = (*files_found + *dirs_found) as u64;
+                    // Each entry reads ~256 bytes of inode data from disk
+                    let bytes_read = total_entries * 256;
+                    pb_clone.set_position(bytes_read.min(image_size));
 
-                    let elapsed_secs = start_time.elapsed().as_secs();
-                    let elapsed_str = if elapsed_secs >= 3600 {
-                        format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
-                    } else if elapsed_secs >= 60 {
-                        format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
+                    let elapsed_secs = start_time.elapsed().as_secs_f64();
+                    let speed = if elapsed_secs > 0.1 {
+                        bytes_read as f64 / elapsed_secs
                     } else {
-                        format!("{}s", elapsed_secs)
+                        0.0
                     };
 
-                    let rate = if elapsed_secs > 0 { total / elapsed_secs } else { 0 };
+                    let elapsed_str = if elapsed_secs >= 3600.0 {
+                        format!("{}h{}m", elapsed_secs as u64 / 3600, (elapsed_secs as u64 % 3600) / 60)
+                    } else if elapsed_secs >= 60.0 {
+                        format!("{}m{}s", elapsed_secs as u64 / 60, elapsed_secs as u64 % 60)
+                    } else {
+                        format!("{}s", elapsed_secs as u64)
+                    };
 
-                    // ETA based on entries found vs total inodes
-                    let eta_str = if rate > 0 && total < pb_total {
-                        let remaining = pb_total - total;
-                        let eta_secs = remaining / rate;
+                    let eta_str = if speed > 0.0 && bytes_read < image_size {
+                        let remaining = (image_size - bytes_read) as f64;
+                        let eta_secs = (remaining / speed) as u64;
                         if eta_secs >= 3600 {
                             format!(" | ETA: {}h{}m", eta_secs / 3600, (eta_secs % 3600) / 60)
                         } else if eta_secs >= 60 {
@@ -1081,13 +1074,13 @@ fn run_scan(
                     };
 
                     pb_clone.set_message(format!(
-                        "| {} files, {} dirs | {}/s | Elapsed: {}{} | Mem: {}",
+                        "| {} files, {} dirs | {}/s{} | Elapsed: {} | Mem: {}",
                         files_found,
                         dirs_found,
-                        rate,
-                        elapsed_str,
+                        bytesize::ByteSize(speed as u64),
                         eta_str,
-                        bytesize::ByteSize(total * 64),
+                        elapsed_str,
+                        bytesize::ByteSize(total_entries * 64),
                     ));
                 }
                 ScanEvent::TreeBuildStarted { label, .. } => {
