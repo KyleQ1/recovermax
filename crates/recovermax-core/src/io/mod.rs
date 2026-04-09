@@ -13,6 +13,8 @@ pub trait DiskRead {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Drop cached pages from RSS. No-op on non-mmap readers.
+    fn drop_cache(&self) {}
 }
 
 /// Memory-mapped reader for disk images and block devices.
@@ -34,15 +36,27 @@ impl ImageReader {
         let mmap = unsafe { Mmap::map(&file) }
             .with_context(|| format!("Failed to mmap {}", path.display()))?;
 
-        // Hint the OS that we'll access sequentially during scanning.
-        // This prevents the page cache from growing unboundedly — the kernel
-        // will free pages behind the read cursor instead of caching them.
+        // Normal advice — Sequential causes aggressive readahead across all
+        // cores which is wrong for random inode reads during tree walking.
         #[cfg(unix)]
-        mmap.advise(memmap2::Advice::Sequential).ok();
+        mmap.advise(memmap2::Advice::Normal).ok();
 
         tracing::info!("Opened image: {} ({} bytes)", path.display(), size);
 
         Ok(Self { mmap, size })
+    }
+
+    /// Drop all cached pages from resident memory.
+    /// Call periodically during long scans to bound RSS.
+    /// Uses MADV_DONTNEED which is safe for read-only mmaps — pages get
+    /// re-faulted from disk on next access.
+    pub fn drop_cache(&self) {
+        #[cfg(unix)]
+        unsafe {
+            self.mmap
+                .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+                .ok();
+        }
     }
 
     pub fn len(&self) -> u64 {
@@ -127,5 +141,9 @@ impl DiskRead for ImageReader {
 
     fn len(&self) -> u64 {
         self.len()
+    }
+
+    fn drop_cache(&self) {
+        self.drop_cache();
     }
 }

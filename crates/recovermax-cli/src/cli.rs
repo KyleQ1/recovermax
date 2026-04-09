@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use indicatif::ProgressBar;
 
 use recovermax_core::carve;
 use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
@@ -1015,30 +1016,54 @@ fn run_scan(
     println!("{}", report.summary());
 
     // Phase 2: Build directory tree for browsable filesystems.
-    // Walks directories from root (NOT all inode slots). For healthy filesystems
-    // this is fast and low RAM. Damaged root filesystems are skipped.
-    // madvise(Sequential) on the mmap prevents page cache bloat.
+    // Walks directories from root (NOT all inode slots). Damaged root = skipped.
+    // Calls drop_cache() every 100K nodes to bound RSS from mmap page cache.
     if let Some(ref path) = output {
-        println!("Building directory tree...");
+        let image_size = reader.len();
+
+        let pb = indicatif::ProgressBar::new(image_size);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                " {spinner:.green} [{bar:40.cyan/blue}] {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(200));
 
         let start_time = Instant::now();
-
+        let pb_clone = pb.clone();
         let callback = move |event: ScanEvent| {
             match &event {
                 ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    if (files_found + dirs_found) % 50000 == 0 {
-                        let elapsed = start_time.elapsed().as_secs();
-                        eprint!(
-                            "\r  {} files, {} dirs found ({elapsed}s)    ",
-                            files_found, dirs_found,
-                        );
-                    }
+                    let total = *files_found as u64;
+                    pb_clone.set_position(total.min(image_size));
+
+                    let elapsed_secs = start_time.elapsed().as_secs_f64();
+                    let speed = if elapsed_secs > 0.5 {
+                        total as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+
+                    let elapsed_str = if elapsed_secs >= 3600.0 {
+                        format!("{}h{}m", elapsed_secs as u64 / 3600, (elapsed_secs as u64 % 3600) / 60)
+                    } else if elapsed_secs >= 60.0 {
+                        format!("{}m{}s", elapsed_secs as u64 / 60, elapsed_secs as u64 % 60)
+                    } else {
+                        format!("{}s", elapsed_secs as u64)
+                    };
+
+                    pb_clone.set_message(format!(
+                        "{} files, {} dirs | {:.0}/s | {}",
+                        files_found, dirs_found, speed, elapsed_str,
+                    ));
                 }
                 ScanEvent::TreeBuildStarted { label, .. } => {
-                    eprintln!("  Scanning {}...", label);
+                    pb_clone.set_message(format!("Scanning {}...", label));
                 }
                 ScanEvent::TreeBuildComplete { total_nodes, .. } => {
-                    eprintln!("\r  {} nodes indexed.              ", total_nodes);
+                    pb_clone.set_message(format!("{} nodes indexed", total_nodes));
                 }
                 _ => {}
             }
@@ -1052,6 +1077,7 @@ fn run_scan(
             Some(&callback),
         )?;
 
+        pb.finish_and_clear();
         println!("Session saved to {}", path.display());
         println!("\nBrowse with:");
         println!("  recovermax ls {} -s {} --fs 0", image.display(), path.display());

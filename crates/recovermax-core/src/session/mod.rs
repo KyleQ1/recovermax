@@ -1006,13 +1006,16 @@ fn build_filesystem_sessions_binary(
             match ext4.list_directory(2) {
                 Ok(root_entries) => {
                     let mut visited = HashSet::from([2u64]);
+                    let mut dirs_found = 0usize;
                     build_ext4_subtree_compact(
+                        reader,
                         &ext4,
                         filesystem_index as u16,
                         root_idx,
                         &root_entries,
                         &mut visited,
                         &mut tree,
+                        &mut dirs_found,
                         0,
                         on_event,
                     );
@@ -1060,12 +1063,14 @@ fn build_filesystem_sessions_binary(
 const MAX_TREE_DEPTH_COMPACT: usize = 64;
 
 fn build_ext4_subtree_compact(
+    reader: &ImageReader,
     ext4: &Ext4Fs<'_>,
     filesystem_index: u16,
     parent_index: u32,
     entries: &[crate::fs::DirEntry],
     visited: &mut HashSet<u64>,
     tree: &mut compact_tree::CompactTree,
+    dirs_found: &mut usize,
     depth: usize,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) {
@@ -1114,27 +1119,37 @@ fn build_ext4_subtree_compact(
             dtime,
         );
 
-        // Progress callback every 500 nodes
-        if let Some(cb) = on_event {
-            if tree.node_count() % 50000 == 0 {
+        // Progress + periodic cache drop to bound RSS
+        let count = tree.node_count();
+        if count % 50000 == 0 {
+            if let Some(cb) = on_event {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: filesystem_index as usize,
-                    files_found: tree.node_count(),
-                    dirs_found: 0, bytes_offset: 0,
+                    files_found: count,
+                    dirs_found: *dirs_found,
+                    bytes_offset: 0,
                 });
+            }
+            // Drop mmap page cache every 100K nodes to keep RSS bounded.
+            // Pages get re-faulted on next read but the kernel frees the old ones.
+            if count % 100_000 == 0 {
+                reader.drop_cache();
             }
         }
 
         if file_type == FileType::Directory && entry.inode > 0 && visited.insert(entry.inode) {
+            *dirs_found += 1;
             match ext4.list_directory(entry.inode) {
                 Ok(children) => {
                     build_ext4_subtree_compact(
+                        reader,
                         ext4,
                         filesystem_index,
                         node_idx,
                         &children,
                         visited,
                         tree,
+                        dirs_found,
                         depth + 1,
                         on_event,
                     );
