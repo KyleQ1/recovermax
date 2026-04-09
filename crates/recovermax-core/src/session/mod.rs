@@ -834,6 +834,7 @@ fn build_filesystem_sessions(
             cb(crate::scan::ScanEvent::TreeBuildStarted {
                 filesystem_index,
                 label: fs_info.label.clone(),
+                total_inodes: ext4.superblock.inodes_count as u64,
             });
         }
 
@@ -980,6 +981,7 @@ fn build_filesystem_sessions_binary(
             cb(crate::scan::ScanEvent::TreeBuildStarted {
                 filesystem_index,
                 label: fs_info.label.clone(),
+                total_inodes: ext4.superblock.inodes_count as u64,
             });
         }
 

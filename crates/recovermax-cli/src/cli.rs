@@ -821,10 +821,10 @@ impl ScanDisplay {
                 self.file_types_found += 1;
             }
             ScanEvent::PhaseComplete { .. } => {}
-            ScanEvent::TreeBuildStarted { .. } => {
+            ScanEvent::TreeBuildStarted { total_inodes, .. } => {
                 self.current_phase = ScanPhase::TreeBuilding;
                 self.bytes_scanned = 0;
-                self.phase_total_bytes = 0;
+                self.phase_total_bytes = *total_inodes;
                 self.phase_start_time = Instant::now();
             }
             ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
@@ -874,7 +874,9 @@ impl ScanDisplay {
         }
         let speed = self.bytes_scanned as f64 / elapsed;
         if self.current_phase == ScanPhase::TreeBuilding {
-            format!(" @ {:.0} entries/s", speed)
+            // Show inode table read speed as MiB/s (each entry reads ~256 bytes of inode data)
+            let data_speed = speed * 256.0;
+            format!(" @ {}/s", bytesize::ByteSize(data_speed as u64))
         } else {
             format!(" @ {}/s", bytesize::ByteSize(speed as u64))
         }
@@ -1101,27 +1103,41 @@ fn run_scan(
         let progress_bar2 = progress_bar.clone();
         let stats_bar2 = stats_bar.clone();
 
-        // Keep the progress bar style but switch to entry counting for tree building
         let tree_callback = move |event: ScanEvent| {
             let mut state = display_clone2.lock().unwrap();
             state.handle_event(&event);
 
             block_bar2.set_message(state.render_block_map());
 
-            progress_bar2.set_length(0);
-            progress_bar2.set_position(0);
+            // Show progress bar with real progress (entries / total_inodes)
+            if state.phase_total_bytes > 0 {
+                progress_bar2.set_length(state.phase_total_bytes);
+                progress_bar2.set_position(state.bytes_scanned);
+            }
+
+            let elapsed = state.phase_start_time.elapsed().as_secs();
+            let elapsed_str = if elapsed >= 3600 {
+                format!("{}h{}m", elapsed / 3600, (elapsed % 3600) / 60)
+            } else if elapsed >= 60 {
+                format!("{}m{}s", elapsed / 60, elapsed % 60)
+            } else {
+                format!("{}s", elapsed)
+            };
+
+            let mem = state.bytes_scanned * 64; // ~64 bytes per CompactNode
+
             progress_bar2.set_message(format!(
-                " | Building file tree: {} entries{}{}",
-                state.bytes_scanned,
+                " | Building file tree{}{} | Elapsed: {} | {}",
                 state.speed_str(),
                 state.eta_str(),
+                elapsed_str,
+                bytesize::ByteSize(mem),
             ));
-            progress_bar2.tick();
 
             stats_bar2.set_message(format!(
-                "Filesystems: {} | Memory: {}",
+                "Filesystems: {} | Entries: {}",
                 state.fs_summary(),
-                bytesize::ByteSize(state.bytes_scanned * 64), // ~64 bytes per CompactNode
+                state.bytes_scanned,
             ));
         };
 
