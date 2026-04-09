@@ -906,19 +906,30 @@ fn build_filesystem_sessions(
 
         let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
 
-        // When root is corrupt, skip the expensive full inode scan.
-        // The scan summary already flagged this as "root damaged".
-        // A future --deep option will handle full inode recovery.
-        if root_inode_ok.is_none() {
-            tracing::info!(
-                "Root inode unreadable for filesystem {} — skipping tree build. \
-                 Use --deep for full inode recovery.",
-                filesystem_index
+        // Deleted orphan scan — finds inodes not reachable from the directory tree.
+        // Fine for small images; the binary .scn path skips this for large images.
+        if root_inode_ok.is_some() {
+            append_ext4_deleted_orphans(
+                &ext4,
+                filesystem_index,
+                root_id,
+                &mut next_node_id,
+                &mut nodes,
+                &mut warnings,
+                &journal_hints,
+            );
+        } else {
+            append_ext4_all_inodes(
+                &ext4,
+                filesystem_index,
+                root_id,
+                &mut next_node_id,
+                &mut nodes,
+                &mut warnings,
+                &journal_hints,
+                on_event,
             );
         }
-
-        // Deleted orphan scan skipped in default path — too expensive for
-        // reimaged drives. Use --deep for deleted file recovery.
 
         sessions.push(FilesystemSessionArtifact {
             filesystem_index,
@@ -1027,21 +1038,9 @@ fn build_filesystem_sessions_binary(
             });
         }
 
-        let journal_hints = ext4.journal_filename_hints().unwrap_or_default();
-
-        // If root is unreadable, log it but DON'T do the full inode scan here.
-        // The full inode scan (all 122M slots) uses too much RAM for the default path.
-        // A future --deep option will handle this case properly.
-        if root_inode_ok.is_none() {
-            tracing::warn!(
-                "Filesystem {} root inode unreadable — skipping tree build for this filesystem",
-                filesystem_index
-            );
-        }
-
-        // Deleted orphan scan skipped in default path — it scans ALL inode
-        // slots which can find millions of "deleted" entries on reimaged drives.
-        // Use --deep for deleted file recovery.
+        // Journal hints and deleted orphan scan deferred to --deep.
+        // journal_filename_hints() loads the entire journal (128-256 MB) into RAM.
+        // Deleted orphan scan iterates all inode tables (millions of slots).
     }
 
     // Save to binary .scn

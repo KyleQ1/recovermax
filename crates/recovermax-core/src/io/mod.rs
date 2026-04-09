@@ -34,6 +34,12 @@ impl ImageReader {
         let mmap = unsafe { Mmap::map(&file) }
             .with_context(|| format!("Failed to mmap {}", path.display()))?;
 
+        // Hint the OS that we'll access sequentially during scanning.
+        // This prevents the page cache from growing unboundedly — the kernel
+        // will free pages behind the read cursor instead of caching them.
+        #[cfg(unix)]
+        mmap.advise(memmap2::Advice::Sequential).ok();
+
         tracing::info!("Opened image: {} ({} bytes)", path.display(), size);
 
         Ok(Self { mmap, size })

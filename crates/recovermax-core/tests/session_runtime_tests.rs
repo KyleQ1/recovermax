@@ -30,6 +30,7 @@ fn synthetic_artifact() -> RecoverySessionArtifact {
                 total_size: 8 * 1024 * 1024,
                 offset: 0,
                     lvm_map: None,
+                    root_readable: true,
             }],
         },
         filesystems: vec![FilesystemSessionArtifact {
@@ -42,6 +43,7 @@ fn synthetic_artifact() -> RecoverySessionArtifact {
                 total_size: 8 * 1024 * 1024,
                 offset: 0,
                     lvm_map: None,
+                    root_readable: true,
             },
             root_node_id: Some(1),
             warnings: Vec::new(),

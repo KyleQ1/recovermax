@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use recovermax_core::carve;
 use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
@@ -1016,99 +1014,38 @@ fn run_scan(
 
     println!("{}", report.summary());
 
-    // Phase 2: Build directory tree for browsable filesystems
-    // This walks directories (NOT all inode slots), so it's fast and low RAM.
-    // A filesystem with 500K files uses ~32 MB.
+    // Save metadata-only .scn (partition + filesystem locations).
+    // Directory tree is NOT built during scan — it's read on-demand during
+    // browse (ls/tree/search). This keeps scan fast (~5s) and low RAM (~50 MB).
     if let Some(ref path) = output {
-        println!("Building directory tree...");
-
-        let start_time = Instant::now();
-        let image_size = reader.len();
-
-        let pb = indicatif::ProgressBar::new(image_size);
-        pb.set_style(
-            indicatif::ProgressStyle::with_template(
-                " {spinner:.green} {bar:40.cyan/blue} {bytes}/{total_bytes} {msg}",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
+        save_metadata_scn(&report, path)?;
+        let fs_count = report.filesystems.len();
+        println!(
+            "Session saved to {} ({} filesystem{}, browse on-demand)",
+            path.display(),
+            fs_count,
+            if fs_count == 1 { "" } else { "s" },
         );
-        pb.enable_steady_tick(std::time::Duration::from_millis(200));
-
-        let pb_clone = pb.clone();
-        let callback = move |event: ScanEvent| {
-            match &event {
-                ScanEvent::TreeBuildProgress { files_found, dirs_found, .. } => {
-                    let total_entries = (*files_found + *dirs_found) as u64;
-                    // Each entry reads ~256 bytes of inode data from disk
-                    let bytes_read = total_entries * 256;
-                    pb_clone.set_position(bytes_read.min(image_size));
-
-                    let elapsed_secs = start_time.elapsed().as_secs_f64();
-                    let speed = if elapsed_secs > 0.1 {
-                        bytes_read as f64 / elapsed_secs
-                    } else {
-                        0.0
-                    };
-
-                    let elapsed_str = if elapsed_secs >= 3600.0 {
-                        format!("{}h{}m", elapsed_secs as u64 / 3600, (elapsed_secs as u64 % 3600) / 60)
-                    } else if elapsed_secs >= 60.0 {
-                        format!("{}m{}s", elapsed_secs as u64 / 60, elapsed_secs as u64 % 60)
-                    } else {
-                        format!("{}s", elapsed_secs as u64)
-                    };
-
-                    let eta_str = if speed > 0.0 && bytes_read < image_size {
-                        let remaining = (image_size - bytes_read) as f64;
-                        let eta_secs = (remaining / speed) as u64;
-                        if eta_secs >= 3600 {
-                            format!(" | ETA: {}h{}m", eta_secs / 3600, (eta_secs % 3600) / 60)
-                        } else if eta_secs >= 60 {
-                            format!(" | ETA: {}m{}s", eta_secs / 60, eta_secs % 60)
-                        } else {
-                            format!(" | ETA: {}s", eta_secs)
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    pb_clone.set_message(format!(
-                        "| {} files, {} dirs | {}/s{} | Elapsed: {} | Mem: {}",
-                        files_found,
-                        dirs_found,
-                        bytesize::ByteSize(speed as u64),
-                        eta_str,
-                        elapsed_str,
-                        bytesize::ByteSize(total_entries * 64),
-                    ));
-                }
-                ScanEvent::TreeBuildStarted { label, .. } => {
-                    pb_clone.set_message(format!("| Scanning {}...", label));
-                }
-                _ => {}
-            }
-        };
-
-        // Build tree using CompactTree (64 bytes/node) and save to binary .scn
-        RecoverySessionArtifact::build_binary_scn(
-            image,
-            &reader,
-            &report,
-            path,
-            Some(&callback),
-        )?;
-
-        pb.finish_and_clear();
-        println!("Session saved to {}", path.display());
-
         println!("\nBrowse with:");
         println!("  recovermax ls {} -s {} --fs 0", image.display(), path.display());
-        println!("  recovermax search {} \"ming\" -s {}", image.display(), path.display());
+        println!("  recovermax search {} \"keyword\" -s {}", image.display(), path.display());
     } else {
-        println!("\nTip: Use -o session.scn to build a session for faster browsing.");
+        println!("\nTip: Use -o session.scn to save scan results for browsing.");
     }
 
+    Ok(())
+}
+
+/// Save a metadata-only binary .scn file (zero nodes).
+/// Contains partition/filesystem locations from the scan report.
+/// Directory tree is read on-demand during browse commands.
+fn save_metadata_scn(report: &recovermax_core::scan::ScanReport, path: &Path) -> Result<()> {
+    use recovermax_core::session::compact_tree::CompactTree;
+
+    let mut tree = CompactTree::new();
+    tree.filesystem_count = report.filesystems.len() as u16;
+    let metadata = serde_json::to_string(report)?;
+    tree.save_to_binary(path, &metadata)?;
     Ok(())
 }
 
@@ -3111,6 +3048,7 @@ mod tests {
                     total_size: reader.len(),
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3123,6 +3061,7 @@ mod tests {
                     total_size: reader.len(),
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: None,
                 warnings: Vec::new(),
@@ -3504,6 +3443,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3516,6 +3456,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3613,6 +3554,7 @@ mod tests {
                     total_size: image_size,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3625,6 +3567,7 @@ mod tests {
                     total_size: image_size,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3735,6 +3678,7 @@ mod tests {
                     total_size: reader.len(),
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3747,6 +3691,7 @@ mod tests {
                     total_size: reader.len(),
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3854,6 +3799,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3866,6 +3812,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -3968,6 +3915,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -3980,6 +3928,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -4074,6 +4023,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -4086,6 +4036,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -4225,6 +4176,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -4234,6 +4186,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                 ],
             },
@@ -4248,6 +4201,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(1),
                     warnings: Vec::new(),
@@ -4292,6 +4246,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(3),
                     warnings: Vec::new(),
@@ -4354,6 +4309,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -4363,6 +4319,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                 ],
             },
@@ -4377,6 +4334,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(1),
                     warnings: Vec::new(),
@@ -4421,6 +4379,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(3),
                     warnings: Vec::new(),
@@ -4478,6 +4437,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 FsInfo {
                     fs_type: "ext4".to_string(),
@@ -4487,6 +4447,7 @@ mod tests {
                     total_size: 4096,
                     offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                 },
             ],
         };
@@ -4512,6 +4473,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 FsInfo {
                     fs_type: "ext4".to_string(),
@@ -4521,6 +4483,7 @@ mod tests {
                     total_size: 4096,
                     offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                 },
             ],
         };
@@ -4550,6 +4513,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     FsInfo {
                         fs_type: "ext4".to_string(),
@@ -4559,6 +4523,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                 ],
             },
@@ -4573,6 +4538,7 @@ mod tests {
                         total_size: 4096,
                         offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(1),
                     warnings: vec![
@@ -4591,6 +4557,7 @@ mod tests {
                         total_size: 4096,
                         offset: 4096,
                     lvm_map: None,
+                    root_readable: true,
                     },
                     root_node_id: Some(2),
                     warnings: vec![
@@ -4897,6 +4864,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -4909,6 +4877,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),
@@ -5194,6 +5163,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 }],
             },
             filesystems: vec![FilesystemSessionArtifact {
@@ -5206,6 +5176,7 @@ mod tests {
                     total_size: 4096,
                     offset: 0,
                     lvm_map: None,
+                    root_readable: true,
                 },
                 root_node_id: Some(1),
                 warnings: Vec::new(),

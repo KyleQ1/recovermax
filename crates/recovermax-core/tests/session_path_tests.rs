@@ -24,6 +24,7 @@ fn sample_report(image_size: u64) -> ScanReport {
             total_size: image_size,
             offset: 0,
                     lvm_map: None,
+                    root_readable: true,
         }],
     }
 }
