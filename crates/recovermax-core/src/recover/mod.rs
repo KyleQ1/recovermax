@@ -309,12 +309,15 @@ impl<'a> Recoverer<'a> {
             match entry.file_type {
                 FileType::Directory => {
                     let dest_dir = self.dest.join(&entry_path);
-                    std::fs::create_dir_all(&dest_dir)?;
+                    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                        tracing::warn!("Cannot create dir {}: {}", dest_dir.display(), e);
+                        continue;
+                    }
 
                     if entry.inode > 0 && visited_dirs.insert(entry.inode) {
                         match ext4.list_directory(entry.inode) {
                             Ok(sub_entries) => {
-                                self.recover_recursive_with_visited(
+                                if let Err(e) = self.recover_recursive_with_visited(
                                     ext4,
                                     &sub_entries,
                                     entry_path,
@@ -322,7 +325,9 @@ impl<'a> Recoverer<'a> {
                                     pb,
                                     visited_dirs,
                                     depth + 1,
-                                )?;
+                                ) {
+                                    tracing::warn!("Error recovering {}: {}", dest_dir.display(), e);
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to read dir inode {}: {}", entry.inode, e);
@@ -335,7 +340,10 @@ impl<'a> Recoverer<'a> {
                     if entry.inode > 0 {
                         let dest_file = self.dest.join(&entry_path);
                         if let Some(parent) = dest_file.parent() {
-                            std::fs::create_dir_all(parent)?;
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                tracing::warn!("Cannot create parent dir for {}: {}", dest_file.display(), e);
+                                continue;
+                            }
                         }
 
                         match ext4.read_inode(entry.inode) {
