@@ -101,27 +101,36 @@ impl ScnReader {
         std::str::from_utf8(&st[start..end]).unwrap_or("?")
     }
 
+    /// Get display basename — resolves "$" sentinel to "File-{inode}".
+    pub fn display_basename(&self, node: &CompactNode) -> String {
+        let raw = self.basename_str(node);
+        if raw == "$" && node.inode != 0 {
+            format!("File-{}", node.inode)
+        } else {
+            raw.to_string()
+        }
+    }
+
     /// Compute the full path for a node by walking the parent chain.
     pub fn compute_path(&self, node_index: u32) -> String {
-        let mut segments: Vec<&str> = Vec::new();
+        let mut segments: Vec<String> = Vec::new();
         let mut current = node_index;
-        let mut depth = 0u32;
+        let mut visited = std::collections::HashSet::new();
 
         loop {
-            if depth > 64 {
-                break;
+            if segments.len() > 64 || !visited.insert(current) {
+                break; // depth limit or cycle detected
             }
             let node = match self.get_compact_node(current) {
                 Some(n) => n,
                 None => break,
             };
-            let basename = self.basename_str(node);
+            let basename = self.display_basename(node);
             if basename == "/" || !node.has_parent() {
                 break;
             }
             segments.push(basename);
             current = node.parent_index;
-            depth += 1;
         }
 
         segments.reverse();
@@ -135,7 +144,7 @@ impl ScnReader {
     /// Convert a CompactNode to a SessionNode (allocates strings on demand).
     pub fn to_session_node(&self, index: u32) -> Option<SessionNode> {
         let node = self.get_compact_node(index)?;
-        let basename = self.basename_str(node).to_string();
+        let basename = self.display_basename(node);
         let path = self.compute_path(index);
 
         Some(SessionNode {
