@@ -963,8 +963,6 @@ fn build_filesystem_sessions_binary(
     output_path: &Path,
     on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
 ) -> Result<()> {
-    const STREAM_THRESHOLD: u64 = 100 * 1024 * 1024 * 1024; // 100 GB
-
     let mut writer = binary_writer::ScnWriter::create(output_path)?;
     writer.set_filesystem_count(report.filesystems.len() as u16);
 
@@ -1017,76 +1015,18 @@ fn build_filesystem_sessions_binary(
             root_inode_ok.as_ref().map_or(0, |i| i.dtime),
         )?;
 
-        if fs_info.total_size >= STREAM_THRESHOLD {
-            // Large filesystem: stream inode table scan to disk.
-            // Sequential I/O through block groups. ~200 MB RAM.
-            stream_inode_table_scan(
-                reader,
-                &ext4,
-                filesystem_index as u16,
-                0, // root is node 0 (already written above)
-                &mut writer,
-                on_event,
-            )?;
-        } else if root_inode_ok.is_some() {
-            // Small filesystem: in-memory directory walk, then write all nodes.
-            let mut tree = compact_tree::CompactTree::with_capacity(100_000);
-            // Re-add root to the in-memory tree
-            let root_idx = tree.add_node(
-                root_inode_ok.as_ref().map_or(2, |i| i.number),
-                u32::MAX, "/", filesystem_index as u16,
-                FileType::Directory,
-                root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
-                EntrySource::Filesystem,
-                root_inode_ok.as_ref().map_or(u64::MAX, |i| i.size),
-                0,
-                root_inode_ok.as_ref().map_or(0, |i| i.ctime),
-                root_inode_ok.as_ref().map_or(0, |i| i.mtime),
-                root_inode_ok.as_ref().map_or(0, |i| i.atime),
-                0,
-            );
-            match ext4.list_directory(2) {
-                Ok(root_entries) => {
-                    let mut visited = HashSet::from([2u64]);
-                    let mut dirs_found = 0usize;
-                    build_ext4_subtree_compact(
-                        reader, &ext4, filesystem_index as u16, root_idx,
-                        &root_entries, &mut visited, &mut tree, &mut dirs_found,
-                        0, on_event,
-                    );
-                }
-                Err(err) => {
-                    tree.add_warning(format_traversal_warning(
-                        "/", &format!("failed to read root directory: {}", err),
-                    ));
-                }
-            }
-            // Write in-memory tree nodes to ScnWriter (skip root, already written)
-            for node in tree.nodes.iter().skip(1) {
-                // Adjust parent_index: +1 offset since writer already has root at 0
-                // for this filesystem. Actually, the writer's node indices are global.
-                // The tree's node 0 = root = already in writer. Tree's other nodes
-                // have parent_index relative to the tree. We need to offset by
-                // (writer.node_count - tree.node_count) ... this is getting complicated.
-                // Simpler: just write the CompactNode directly with adjusted parent.
-                let writer_base = writer.node_count() as u32 - tree.nodes.len() as u32;
-                let mut adjusted = *node;
-                if adjusted.has_parent() {
-                    adjusted.parent_index += writer_base;
-                }
-                // Re-intern the basename into the writer's string table
-                let basename = tree.basename_str(node);
-                let (off, len) = writer.intern_basename(basename);
-                adjusted.basename_offset = off;
-                adjusted.basename_len = len;
-                writer.add_compact_node(adjusted)?;
-            }
-        } else {
-            writer.add_warning(format_traversal_warning(
-                "/",
-                "Root inode unreadable. Use --deep for full inode recovery.",
-            ));
-        }
+        // Stream inode table scan to disk for all filesystems.
+        // Sequential I/O through block groups. ~200 MB RAM.
+        // root_idx is the index of the root node we just wrote.
+        let root_idx = (writer.node_count() - 1) as u32;
+        stream_inode_table_scan(
+            reader,
+            &ext4,
+            filesystem_index as u16,
+            root_idx,
+            &mut writer,
+            on_event,
+        )?;
 
         if let Some(cb) = on_event {
             cb(crate::scan::ScanEvent::TreeBuildComplete {
