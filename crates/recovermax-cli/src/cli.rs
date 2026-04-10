@@ -376,6 +376,13 @@ pub fn run(args: Args) -> Result<()> {
             scan_file,
             memory_budget,
         } => {
+            if let Some(ref sf) = scan_file {
+                if is_binary_scn(sf) {
+                    let bs = BinarySession::open(&image, sf)?;
+                    println!("{}", bs.filesystems_summary());
+                    return Ok(());
+                }
+            }
             let session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -393,6 +400,20 @@ pub fn run(args: Args) -> Result<()> {
             long,
             memory_budget,
         } => {
+            // Fast path: binary .scn → use ScnReader directly (~50 MB vs ~3.4 GB)
+            if let Some(ref sf) = scan_file {
+                if is_binary_scn(sf) {
+                    let bs = BinarySession::open(&image, sf)?;
+                    let node = bs.resolve_node(fs, &path)?;
+                    if node.file_type != FileType::Directory {
+                        println!("{}", format_stat(&node));
+                        return Ok(());
+                    }
+                    let children = bs.list_children(node.filesystem_index, &node.path)?;
+                    print_directory_listing(&children, long, &RecoverySessionArtifact::from_report(&image, bs.report.clone()));
+                    return Ok(());
+                }
+            }
             let mut session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -419,6 +440,18 @@ pub fn run(args: Args) -> Result<()> {
             depth,
             memory_budget,
         } => {
+            if let Some(ref sf) = scan_file {
+                if is_binary_scn(sf) {
+                    let bs = BinarySession::open(&image, sf)?;
+                    let node = bs.resolve_node(fs, &path)?;
+                    // Walk tree via ScnReader
+                    let children = bs.list_children(node.filesystem_index, &node.path)?;
+                    let artifact = RecoverySessionArtifact::from_report(&image, bs.report.clone());
+                    // Simple tree print from ScnReader
+                    print_binary_tree(&bs, node.filesystem_index, &node.path, depth, 0);
+                    return Ok(());
+                }
+            }
             let mut session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -438,6 +471,14 @@ pub fn run(args: Args) -> Result<()> {
             fs,
             memory_budget,
         } => {
+            if let Some(ref sf) = scan_file {
+                if is_binary_scn(sf) {
+                    let bs = BinarySession::open(&image, sf)?;
+                    let node = bs.resolve_node(fs, &target)?;
+                    println!("{}", format_stat(&node));
+                    return Ok(());
+                }
+            }
             let mut session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -583,6 +624,20 @@ pub fn run(args: Args) -> Result<()> {
             exact,
             memory_budget,
         } => {
+            if let Some(ref sf) = scan_file {
+                if is_binary_scn(sf) {
+                    let bs = BinarySession::open(&image, sf)?;
+                    let options = SearchOptions {
+                        ignore_case,
+                        exact,
+                        filesystem_index: fs,
+                        ..Default::default()
+                    };
+                    let matches = bs.search(&query, &options);
+                    print_matches(&matches);
+                    return Ok(());
+                }
+            }
             let mut session = open_session(
                 &image,
                 scan_file.as_deref(),
@@ -1003,8 +1058,8 @@ fn run_scan(
     image: &Path,
     output: Option<PathBuf>,
     deep_scan: bool,
-    _start: Option<String>,
-    _end: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
     _file_types: Vec<String>,
     _fs_type: Vec<String>,
     _resume: bool,
@@ -1028,6 +1083,30 @@ fn run_scan(
                 return Ok(());
             }
         }
+    }
+
+    // If --start is provided, do a raw inode table scan on the specified range.
+    // This is for drives where all superblocks are gone (e.g., Proxmox reimaging).
+    if let Some(ref start_str) = start {
+        let start_offset = parse_byte_offset(start_str)?;
+        let end_offset = end
+            .as_ref()
+            .map(|s| parse_byte_offset(s))
+            .transpose()?
+            .unwrap_or(reader.len());
+
+        let out_path = output
+            .as_ref()
+            .ok_or_else(|| anyhow!("--start requires -o output.scn"))?;
+
+        println!(
+            "Raw inode scan: {} to {} ({})",
+            bytesize::ByteSize(start_offset),
+            bytesize::ByteSize(end_offset),
+            bytesize::ByteSize(end_offset - start_offset),
+        );
+
+        return run_raw_scan(image, out_path, start_str, end.as_deref());
     }
 
     // Phase 1: Find partitions + filesystems (quick)
@@ -1298,6 +1377,93 @@ fn select_deleted_filesystem(
                 }
             }
         }
+    }
+}
+
+/// Lightweight binary session — uses ScnReader (mmap) instead of loading
+/// all nodes into RAM. ~50 MB vs ~3.4 GB for 12M nodes.
+struct BinarySession {
+    scn: recovermax_core::session::binary_reader::ScnReader,
+    reader: ImageReader,
+    report: recovermax_core::scan::ScanReport,
+}
+
+impl BinarySession {
+    fn open(image: &Path, scn_path: &Path) -> Result<Self> {
+        let scn = recovermax_core::session::binary_reader::ScnReader::open(scn_path)?;
+        let reader = ImageReader::open(image)?;
+
+        let report = if let Some(meta) = scn.metadata_json() {
+            serde_json::from_str(meta).unwrap_or_else(|_| recovermax_core::scan::ScanReport {
+                image_size: reader.len(),
+                partitions: Vec::new(),
+                filesystems: Vec::new(),
+            })
+        } else {
+            recovermax_core::scan::ScanReport {
+                image_size: reader.len(),
+                partitions: Vec::new(),
+                filesystems: Vec::new(),
+            }
+        };
+
+        let node_count = scn.node_count();
+        println!(
+            "Loaded binary session: {} nodes from {} (lazy)",
+            node_count,
+            scn_path.display(),
+        );
+
+        Ok(Self { scn, reader, report })
+    }
+
+    fn resolve_node(&self, fs: Option<usize>, target: &str) -> Result<SessionNode> {
+        if let Some(fs_idx) = fs {
+            return self.scn.resolve_node(fs_idx, target);
+        }
+        // Try all filesystems
+        for (i, _) in self.report.filesystems.iter().enumerate() {
+            if let Ok(node) = self.scn.resolve_node(i, target) {
+                return Ok(node);
+            }
+        }
+        bail!("target {} not found in any filesystem", target)
+    }
+
+    fn list_children(&self, fs_idx: usize, path: &str) -> Result<Vec<SessionNode>> {
+        self.scn.list_children(fs_idx, path)
+    }
+
+    fn search(&self, query: &str, options: &SearchOptions) -> Vec<recovermax_core::search::SearchMatch> {
+        self.scn.search(query, options)
+    }
+
+    fn filesystems_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Filesystems:\n");
+        for (i, fs) in self.report.filesystems.iter().enumerate() {
+            // Count nodes for this filesystem
+            let mut count = 0u64;
+            for j in 0..self.scn.node_count() as u32 {
+                if let Some(node) = self.scn.get_compact_node(j) {
+                    if node.filesystem_index == i as u16 {
+                        count += 1;
+                    }
+                }
+                if count > 0 && j > 1000 {
+                    // Estimate from sample
+                    count = count * self.scn.node_count() / j as u64;
+                    break;
+                }
+            }
+            out.push_str(&format!(
+                "  [{}] {} \"{}\" ({}) tree: ~{} nodes\n",
+                i, fs.fs_type, fs.label,
+                bytesize::ByteSize(fs.total_size),
+                count,
+            ));
+        }
+        out
     }
 }
 
@@ -2857,6 +3023,48 @@ fn print_tree_entries(
         let indent = "  ".repeat(entry.depth);
         let partial = node_has_traversal_warning(artifact, &entry.node);
         println!("{}{}", indent, format_node_short(&entry.node, partial));
+    }
+}
+
+fn format_stat(node: &SessionNode) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Path: {}\n", node.path));
+    out.push_str(&format!("Filesystem: {}\n", node.filesystem_index));
+    out.push_str(&format!("Node id: {}\n", node.id));
+    out.push_str(&format!(
+        "Inode: {}\n",
+        node.inode.map(|i| i.to_string()).unwrap_or_else(|| "-".into())
+    ));
+    out.push_str(&format!("Type: {}\n", file_type_label(node.file_type)));
+    out.push_str(&format!("Deleted: {}\n", node.deleted));
+    out.push_str(&format!(
+        "Size: {}\n",
+        node.size
+            .map(|s| bytesize::ByteSize(s).to_string())
+            .unwrap_or_else(|| "-".into())
+    ));
+    out.push_str(&format!("Basename: {}\n", node.basename));
+    out
+}
+
+fn print_binary_tree(bs: &BinarySession, fs_idx: usize, path: &str, max_depth: usize, depth: usize) {
+    if depth > max_depth {
+        return;
+    }
+    let indent = "  ".repeat(depth);
+    if let Ok(children) = bs.list_children(fs_idx, path) {
+        for child in &children {
+            let type_char = match child.file_type {
+                FileType::Directory => "d",
+                FileType::RegularFile => "-",
+                FileType::Symlink => "l",
+                FileType::Other => "?",
+            };
+            println!("{}{} {}", indent, type_char, child.basename);
+            if child.file_type == FileType::Directory && depth < max_depth {
+                print_binary_tree(bs, fs_idx, &child.path, max_depth, depth + 1);
+            }
+        }
     }
 }
 
