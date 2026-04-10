@@ -1440,15 +1440,29 @@ fn raw_inode_table_scan(
     let mut blocks_checked: u64 = 0;
     let mut inode_table_blocks: u64 = 0;
 
+    // Read 1 MB chunks (256 blocks) at a time to reduce NFS round trips.
+    // Each chunk is split into 4 KB blocks and checked for inode patterns.
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
+    const BLOCKS_PER_CHUNK: usize = CHUNK_SIZE / BLOCK_SIZE; // 256
+
     let mut offset = start_offset;
     while offset + BLOCK_SIZE as u64 <= disk_size {
-        let block = match reader.read_at(offset, BLOCK_SIZE) {
-            Ok(b) if b.len() == BLOCK_SIZE => b,
+        // Read a 1 MB chunk
+        let chunk_len = CHUNK_SIZE.min((disk_size - offset) as usize);
+        let chunk = match reader.read_at(offset, chunk_len) {
+            Ok(c) => c,
             _ => {
-                offset += BLOCK_SIZE as u64;
+                offset += chunk_len as u64;
                 continue;
             }
         };
+
+        // Process each 4 KB block within the chunk
+        let num_blocks = chunk.len() / BLOCK_SIZE;
+        for block_idx in 0..num_blocks {
+        let block_start = block_idx * BLOCK_SIZE;
+        let block = &chunk[block_start..block_start + BLOCK_SIZE];
+        let block_offset = offset + block_start as u64;
 
         // Check if this block looks like an inode table
         let mut valid_count = 0usize;
@@ -1500,8 +1514,8 @@ fn raw_inode_table_scan(
                 }
 
                 // Synthetic inode number based on disk position
-                let synthetic_ino = offset / INODE_SIZE as u64 + slot as u64;
-                let inode_disk_offset = offset + (slot * INODE_SIZE) as u64;
+                let synthetic_ino = block_offset / INODE_SIZE as u64 + slot as u64;
+                let inode_disk_offset = block_offset + (slot * INODE_SIZE) as u64;
 
                 if mode & 0xF000 == 0x4000 {
                     dir_offsets.push(inode_disk_offset);
@@ -1520,8 +1534,7 @@ fn raw_inode_table_scan(
             }
         }
 
-        offset += BLOCK_SIZE as u64;
-        blocks_checked += 1;
+        blocks_checked += num_blocks as u64;
 
         if blocks_checked % 100_000 == 0 {
             if let Some(cb) = on_event {
@@ -1529,13 +1542,16 @@ fn raw_inode_table_scan(
                     filesystem_index: 0,
                     files_found: found_inodes.len(),
                     dirs_found: dir_offsets.len(),
-                    bytes_offset: offset,
+                    bytes_offset: offset + chunk_len as u64,
                 });
             }
             if blocks_checked % 500_000 == 0 {
                 reader.drop_cache();
             }
         }
+        } // end block_idx loop
+
+        offset += chunk_len as u64;
     }
 
     tracing::info!(
