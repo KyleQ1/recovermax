@@ -15,7 +15,7 @@ use crate::io::ImageReader;
 use crate::scan::ScanReport;
 use crate::search::{path_matches, SearchMatch, SearchOptions};
 
-const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB for large sessions
 const MAX_TREE_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
