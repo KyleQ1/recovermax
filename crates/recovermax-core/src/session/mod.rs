@@ -1048,9 +1048,15 @@ fn build_filesystem_sessions_binary(
     Ok(())
 }
 
-/// Stream inode table scan to ScnWriter.
-/// Walks all block groups sequentially, reading inode tables and writing
-/// valid inodes directly to disk. ~200 MB RAM (bitmap + string table).
+/// Two-pass inode table scan with directory name resolution.
+///
+/// Pass 1: Scan all inode tables → bitmap of valid inodes + read directory
+///         entries to build name_map (child_inode → (parent_inode, basename)).
+/// Pass 2: Re-scan inode tables → write nodes to ScnWriter with real filenames
+///         and proper parent-child links from name_map.
+///
+/// RAM: bitmap (15 MB) + name_map (~1 GB for 12M entries) + inode_to_index (~150 MB)
+/// Total: ~1.2 GB for a 122M-inode filesystem.
 fn stream_inode_table_scan(
     reader: &ImageReader,
     ext4: &Ext4Fs<'_>,
@@ -1068,17 +1074,146 @@ fn stream_inode_table_scan(
     let fs_total_bytes = ext4.superblock.total_size();
     let partition_offset = ext4.partition_offset();
 
-    // Add $RecoveredFiles container directory
+    // ── Pass 1: find valid inodes + read directory entries for names ──
+    let mut seen = vec![0u8; total_inodes / 8 + 1];
+    let mut dir_inodes: Vec<u64> = Vec::new();
+    let mut pass1_count = 0usize;
+
+    for group in 0..num_groups {
+        let bg = match ext4.read_group_descriptor(group) {
+            Ok(bg) => bg,
+            Err(_) => continue,
+        };
+        if bg.inode_table == 0 || bg.inode_table >= ext4.superblock.blocks_count {
+            continue;
+        }
+
+        let inode_table_blocks =
+            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+
+        for tbl_block in 0..inode_table_blocks {
+            let abs_block = bg.inode_table + tbl_block as u64;
+            let block_data = match ext4.read_block(abs_block) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for slot in 0..inodes_per_block {
+                let local_index = tbl_block * inodes_per_block + slot;
+                if local_index >= inodes_per_group as usize {
+                    break;
+                }
+
+                let inode_num =
+                    group as u64 * inodes_per_group as u64 + local_index as u64 + 1;
+                let ino = inode_num as usize;
+                if inode_num <= 10 || ino >= total_inodes {
+                    continue;
+                }
+
+                let off = slot * inode_size;
+                if off + inode_size > block_data.len() {
+                    break;
+                }
+
+                let data = &block_data[off..off + inode_size];
+                if !is_valid_inode(data, fs_total_bytes) {
+                    continue;
+                }
+
+                seen[ino / 8] |= 1 << (ino % 8);
+                pass1_count += 1;
+
+                let mode = u16::from_le_bytes([data[0], data[1]]);
+                if mode & 0xF000 == 0x4000 {
+                    dir_inodes.push(inode_num);
+                }
+
+                if pass1_count % 100_000 == 0 {
+                    let bytes_offset = partition_offset
+                        + (group as u64 * inodes_per_group as u64 * inode_size as u64);
+                    if let Some(cb) = on_event {
+                        cb(crate::scan::ScanEvent::TreeBuildProgress {
+                            filesystem_index: filesystem_index as usize,
+                            files_found: pass1_count,
+                            dirs_found: dir_inodes.len(),
+                            bytes_offset,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        "Pass 1 complete: {} valid inodes, {} directories",
+        pass1_count, dir_inodes.len(),
+    );
+
+    // Read directory entries to build name map.
+    // name_map: child_inode → (parent_inode, basename)
+    let mut name_map: HashMap<u64, (u64, String)> =
+        HashMap::with_capacity(pass1_count.min(10_000_000));
+
+    // Always map inode 2 (root) so children of root get proper parent links
+    name_map.insert(2, (0, "/".to_string()));
+
+    let mut dirs_read = 0usize;
+    for &dir_inode in &dir_inodes {
+        if let Ok(entries) = ext4.list_directory(dir_inode) {
+            for entry in &entries {
+                if entry.name == "." || entry.name == ".." || entry.inode == 0 {
+                    continue;
+                }
+                name_map.insert(entry.inode, (dir_inode, entry.name.clone()));
+            }
+            dirs_read += 1;
+        }
+        if dirs_read % 10_000 == 0 && dirs_read > 0 {
+            if let Some(cb) = on_event {
+                cb(crate::scan::ScanEvent::TreeBuildProgress {
+                    filesystem_index: filesystem_index as usize,
+                    files_found: name_map.len(),
+                    dirs_found: dirs_read,
+                    bytes_offset: partition_offset + fs_total_bytes / 2, // midpoint estimate
+                });
+            }
+            reader.drop_cache();
+        }
+    }
+
+    tracing::info!(
+        "Directory scan: read {} of {} directories, {} name entries",
+        dirs_read, dir_inodes.len(), name_map.len(),
+    );
+
+    // ── Pre-assign node indices ──
+    // Scan bitmap to map inode_num → node_index (assigned in inode-number order).
+    // Index 0 = root ("/"), already written by caller.
+    // Index 1 = "$RecoveredFiles" for unnamed orphans.
     let recovered_dir = writer.add_raw_inode(
         0, root_idx, "$RecoveredFiles", filesystem_index,
         FileType::Directory, false, EntrySource::SyntheticOrphan,
         u64::MAX, 0, 0, 0, 0, 0,
     )?;
 
+    let mut inode_to_index: HashMap<u64, u32> =
+        HashMap::with_capacity(pass1_count.min(10_000_000));
+    // Map root inode 2 to the root node index
+    inode_to_index.insert(2, root_idx);
+
+    let base_index = writer.node_count() as u32; // next available index
+    let mut counter = 0u32;
+    for ino in 11..total_inodes {
+        if (seen[ino / 8] & (1 << (ino % 8))) != 0 {
+            inode_to_index.insert(ino as u64, base_index + counter);
+            counter += 1;
+        }
+    }
+
+    // ── Pass 2: write nodes with real names and parent links ──
     let mut found = 0usize;
     let mut dirs_found = 0usize;
-    // Bitmap: 1 bit per inode. 122M inodes = 15 MB.
-    let mut seen = vec![0u8; total_inodes / 8 + 1];
 
     for group in 0..num_groups {
         let bg = match ext4.read_group_descriptor(group) {
@@ -1110,7 +1245,7 @@ fn stream_inode_table_scan(
                 let ino = inode_num as usize;
                 if inode_num <= 10
                     || ino >= total_inodes
-                    || (seen[ino / 8] & (1 << (ino % 8))) != 0
+                    || (seen[ino / 8] & (1 << (ino % 8))) == 0
                 {
                     continue;
                 }
@@ -1140,19 +1275,7 @@ fn stream_inode_table_scan(
                 };
                 let size = (size_hi as u64) << 32 | size_lo as u64;
 
-                if mode == 0 || size == 0 {
-                    continue;
-                }
-
                 let is_deleted = dtime != 0 || links_count == 0;
-                if is_deleted && mtime == 0 && ctime == 0 {
-                    continue;
-                }
-                if size > fs_total_bytes {
-                    continue;
-                }
-
-                seen[ino / 8] |= 1 << (ino % 8);
 
                 let file_type = match mode & 0xF000 {
                     0x4000 => {
@@ -1170,8 +1293,21 @@ fn stream_inode_table_scan(
                     EntrySource::Filesystem
                 };
 
+                // Look up real name and parent from directory entries
+                let (parent_idx, basename) = if let Some((parent_inode, name)) =
+                    name_map.get(&inode_num)
+                {
+                    let pidx = inode_to_index
+                        .get(parent_inode)
+                        .copied()
+                        .unwrap_or(recovered_dir);
+                    (pidx, name.as_str())
+                } else {
+                    (recovered_dir, "$")
+                };
+
                 writer.add_raw_inode(
-                    inode_num, recovered_dir, "$", filesystem_index,
+                    inode_num, parent_idx, basename, filesystem_index,
                     file_type, is_deleted, source,
                     size, 0, ctime, mtime, atime, dtime,
                 )?;
@@ -1179,7 +1315,6 @@ fn stream_inode_table_scan(
                 found += 1;
 
                 if found % 50000 == 0 {
-                    // Byte offset: position within the inode tables
                     let bytes_offset = partition_offset
                         + (group as u64 * inodes_per_group as u64 * inode_size as u64);
 
@@ -1191,7 +1326,6 @@ fn stream_inode_table_scan(
                             bytes_offset,
                         });
                     }
-                    // Drop page cache periodically
                     if found % 200_000 == 0 {
                         reader.drop_cache();
                     }
@@ -1201,11 +1335,41 @@ fn stream_inode_table_scan(
     }
 
     tracing::info!(
-        "Streamed {} inodes ({} dirs) for filesystem {} to .scn",
-        found, dirs_found, filesystem_index,
+        "Pass 2 complete: wrote {} nodes ({} dirs, {} named) for filesystem {}",
+        found, dirs_found, name_map.len(), filesystem_index,
     );
 
     Ok(())
+}
+
+/// Check if raw inode data represents a valid inode worth keeping.
+fn is_valid_inode(data: &[u8], fs_total_bytes: u64) -> bool {
+    let mode = u16::from_le_bytes([data[0], data[1]]);
+    let size_lo = u32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+    let dtime = u32::from_le_bytes(data[20..24].try_into().unwrap_or([0; 4]));
+    let links_count = u16::from_le_bytes([data[26], data[27]]);
+    let mtime = u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
+    let ctime = u32::from_le_bytes(data[12..16].try_into().unwrap_or([0; 4]));
+    let size_hi = if data.len() >= 112 {
+        u32::from_le_bytes(data[108..112].try_into().unwrap_or([0; 4]))
+    } else {
+        0
+    };
+    let size = (size_hi as u64) << 32 | size_lo as u64;
+
+    if mode == 0 || size == 0 {
+        return false;
+    }
+
+    let is_deleted = dtime != 0 || links_count == 0;
+    if is_deleted && mtime == 0 && ctime == 0 {
+        return false;
+    }
+    if size > fs_total_bytes {
+        return false;
+    }
+
+    matches!(mode & 0xF000, 0x4000 | 0x8000 | 0xA000)
 }
 
 const MAX_TREE_DEPTH_COMPACT: usize = 64;
