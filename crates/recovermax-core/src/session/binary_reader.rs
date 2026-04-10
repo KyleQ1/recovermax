@@ -253,7 +253,9 @@ impl ScnReader {
             let mut found = false;
             for &child_idx in &children {
                 if let Some(child_node) = self.get_compact_node(child_idx) {
-                    if self.basename_str(child_node) == *segment {
+                    // Match against both raw basename ("$") and display name ("File-{inode}")
+                    let raw = self.basename_str(child_node);
+                    if raw == *segment || self.display_basename(child_node) == *segment {
                         current = child_idx;
                         found = true;
                         break;
