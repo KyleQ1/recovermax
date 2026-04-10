@@ -66,6 +66,25 @@ pub enum Command {
         resume: bool,
     },
 
+    /// Raw inode table scan — finds ext4 inodes on disk without needing a
+    /// superblock. For drives where all superblocks have been overwritten.
+    RawScan {
+        /// Path to disk image or block device
+        image: PathBuf,
+
+        /// Output .scn file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Start scanning at this byte offset (supports K/M/G/T suffixes)
+        #[arg(long, default_value = "0")]
+        start: String,
+
+        /// Stop scanning at this byte offset (default: end of image)
+        #[arg(long)]
+        end: Option<String>,
+    },
+
     /// List filesystems from a session artifact or live scan
     Filesystems {
         /// Path to disk image or block device
@@ -346,6 +365,12 @@ pub fn run(args: Args) -> Result<()> {
             fs_type,
             resume,
         } => run_scan(&image, output, deep_scan, start, end, file_types, fs_type, resume),
+        Command::RawScan {
+            image,
+            output,
+            start,
+            end,
+        } => run_raw_scan(&image, &output, &start, end.as_deref()),
         Command::Filesystems {
             image,
             scan_file,
@@ -1137,6 +1162,89 @@ fn save_metadata_scn(report: &recovermax_core::scan::ScanReport, path: &Path) ->
     tree.filesystem_count = report.filesystems.len() as u16;
     let metadata = serde_json::to_string(report)?;
     tree.save_to_binary(path, &metadata)?;
+    Ok(())
+}
+
+fn run_raw_scan(image: &Path, output: &Path, start: &str, end: Option<&str>) -> Result<()> {
+    let reader = ImageReader::open(image)?;
+
+    let start_offset = parse_byte_offset(start)?;
+    let end_offset = end
+        .map(|s| parse_byte_offset(s))
+        .transpose()?
+        .unwrap_or(reader.len());
+
+    println!(
+        "Raw inode table scan: {} to {} ({})",
+        bytesize::ByteSize(start_offset),
+        bytesize::ByteSize(end_offset),
+        bytesize::ByteSize(end_offset - start_offset),
+    );
+
+    let pb = indicatif::ProgressBar::new(end_offset - start_offset);
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(
+            " {spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(200));
+
+    let start_time = Instant::now();
+    let pb_clone = pb.clone();
+    let callback = move |event: ScanEvent| {
+        match &event {
+            ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } => {
+                let scanned = bytes_offset.saturating_sub(start_offset);
+                pb_clone.set_position(scanned);
+
+                let elapsed_secs = start_time.elapsed().as_secs_f64();
+                let elapsed_str = format_duration(elapsed_secs);
+
+                let speed = if elapsed_secs > 0.5 {
+                    scanned as f64 / elapsed_secs
+                } else {
+                    0.0
+                };
+
+                let total = end_offset - start_offset;
+                let eta_str = if speed > 0.0 && scanned < total && elapsed_secs > 2.0 {
+                    let remaining = (total - scanned) as f64;
+                    let eta_secs = remaining / speed;
+                    format!(" | ETA: {}", format_duration(eta_secs))
+                } else {
+                    String::new()
+                };
+
+                pb_clone.set_message(format!(
+                    "| {}/s | {} inodes, {} dirs{} | Elapsed: {}",
+                    bytesize::ByteSize(speed as u64),
+                    files_found, dirs_found,
+                    eta_str, elapsed_str,
+                ));
+            }
+            _ => {}
+        }
+    };
+
+    RecoverySessionArtifact::build_raw_scan(
+        &reader,
+        output,
+        start_offset,
+        end_offset,
+        Some(&callback),
+    )?;
+
+    pb.finish_and_clear();
+    println!("Raw scan saved to {}", output.display());
+    println!("\nBrowse with:");
+    println!(
+        "  recovermax ls {} -s {} --fs 0",
+        image.display(),
+        output.display()
+    );
+
     Ok(())
 }
 

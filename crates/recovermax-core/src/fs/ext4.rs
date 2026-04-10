@@ -274,6 +274,36 @@ impl<'a> Ext4Fs<'a> {
         })
     }
 
+    /// Create an Ext4Fs with synthetic parameters (no superblock on disk).
+    /// Used for raw inode table scanning on reimaged drives where all
+    /// superblocks have been overwritten.
+    pub fn with_synthetic_params(
+        reader: &'a dyn DiskRead,
+        partition_offset: u64,
+    ) -> Self {
+        Self {
+            reader,
+            superblock: Ext4Superblock {
+                inodes_count: u32::MAX,
+                blocks_count: reader.len() / 4096,
+                free_blocks_count: 0,
+                free_inodes_count: 0,
+                first_data_block: 0,
+                log_block_size: 2, // 4096
+                blocks_per_group: 32768,
+                inodes_per_group: 8192,
+                magic: 0xEF53,
+                inode_size: 256,
+                volume_name: String::new(),
+                uuid: [0; 16],
+                feature_incompat: 0,
+                journal_inum: 0,
+            },
+            partition_offset,
+            sb_group: 0,
+        }
+    }
+
     /// Absolute disk offset where this filesystem starts.
     pub fn partition_offset(&self) -> u64 {
         self.partition_offset
@@ -394,6 +424,60 @@ impl<'a> Ext4Fs<'a> {
             atime,
             block_data,
         })
+    }
+
+    /// Read an inode from an absolute disk offset (for raw scanning without BGD).
+    pub fn read_inode_at_offset(&self, disk_offset: u64) -> Result<Inode> {
+        let data = self
+            .reader
+            .read_at_exact(disk_offset, self.superblock.inode_size as usize)?;
+
+        let mode = u16::from_le_bytes(data[0..2].try_into()?);
+        let atime = u32::from_le_bytes(data[8..12].try_into()?);
+        let ctime = u32::from_le_bytes(data[12..16].try_into()?);
+        let mtime = u32::from_le_bytes(data[16..20].try_into()?);
+        let size_lo = u32::from_le_bytes(data[4..8].try_into()?);
+        let size_hi = if data.len() >= 112 {
+            u32::from_le_bytes(data[108..112].try_into()?)
+        } else {
+            0
+        };
+        let file_type = match mode & 0xF000 {
+            0x8000 => FileType::RegularFile,
+            0x4000 => FileType::Directory,
+            0xA000 => FileType::Symlink,
+            _ => FileType::Other,
+        };
+        let size = if file_type == FileType::RegularFile {
+            (size_hi as u64) << 32 | size_lo as u64
+        } else {
+            size_lo as u64
+        };
+        let links_count = u16::from_le_bytes(data[26..28].try_into()?);
+        let flags = u32::from_le_bytes(data[32..36].try_into()?);
+        let dtime = u32::from_le_bytes(data[20..24].try_into()?);
+
+        let mut block_data = [0u8; 60];
+        block_data.copy_from_slice(&data[40..100]);
+
+        Ok(Inode {
+            number: 0, // unknown — raw scan
+            mode,
+            size,
+            links_count,
+            flags,
+            dtime,
+            ctime,
+            mtime,
+            atime,
+            block_data,
+        })
+    }
+
+    /// List directory entries from an already-read Inode struct.
+    pub fn list_directory_from_inode(&self, inode: &Inode) -> Result<Vec<DirEntry>> {
+        let data = self.read_inode_data(inode)?;
+        parse_directory_entries(&data, inode)
     }
 
     /// List directory entries from an inode
