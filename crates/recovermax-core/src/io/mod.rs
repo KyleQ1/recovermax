@@ -59,6 +59,19 @@ impl ImageReader {
         }
     }
 
+    /// Hint sequential access pattern. Enables aggressive kernel readahead
+    /// for linear scans. Call before sequential scan operations.
+    pub fn advise_sequential(&self) {
+        #[cfg(unix)]
+        self.mmap.advise(memmap2::Advice::Sequential).ok();
+    }
+
+    /// Reset to normal access pattern (default random-friendly behavior).
+    pub fn advise_normal(&self) {
+        #[cfg(unix)]
+        self.mmap.advise(memmap2::Advice::Normal).ok();
+    }
+
     pub fn len(&self) -> u64 {
         self.size
     }

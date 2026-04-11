@@ -1440,14 +1440,13 @@ fn raw_inode_table_scan(
     let mut blocks_checked: u64 = 0;
     let mut inode_table_blocks: u64 = 0;
 
-    // Read 1 MB chunks (256 blocks) at a time to reduce NFS round trips.
-    // Each chunk is split into 4 KB blocks and checked for inode patterns.
-    const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
-    const BLOCKS_PER_CHUNK: usize = CHUNK_SIZE / BLOCK_SIZE; // 256
+    // Hint sequential access — enables aggressive kernel readahead for
+    // the linear scan. Reset to normal when done.
+    reader.advise_sequential();
 
+    const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB chunks for better readahead
     let mut offset = start_offset;
     while offset + BLOCK_SIZE as u64 <= disk_size {
-        // Read a 1 MB chunk
         let chunk_len = CHUNK_SIZE.min((disk_size - offset) as usize);
         let chunk = match reader.read_at(offset, chunk_len) {
             Ok(c) => c,
@@ -1457,12 +1456,18 @@ fn raw_inode_table_scan(
             }
         };
 
-        // Process each 4 KB block within the chunk
         let num_blocks = chunk.len() / BLOCK_SIZE;
         for block_idx in 0..num_blocks {
         let block_start = block_idx * BLOCK_SIZE;
         let block = &chunk[block_start..block_start + BLOCK_SIZE];
         let block_offset = offset + block_start as u64;
+
+        // Fast skip: if first 16 bytes are all zeros, block is empty.
+        // Valid inodes always have non-zero mode (bytes 0-1) or non-zero
+        // size (bytes 4-7). This skips unallocated space quickly.
+        if block[0..16] == [0u8; 16] {
+            continue;
+        }
 
         // Check if this block looks like an inode table
         let mut valid_count = 0usize;
@@ -1553,6 +1558,9 @@ fn raw_inode_table_scan(
 
         offset += chunk_len as u64;
     }
+
+    // Reset to normal access pattern for the directory reading phase (random access)
+    reader.advise_normal();
 
     tracing::info!(
         "Pass 1 complete: {} inode table blocks, {} valid inodes, {} directories",
