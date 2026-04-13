@@ -26,7 +26,13 @@ jobs:
     steps:
       - name: CLA Assistant
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+        # Pinned to a commit SHA (not the v2.6.1 tag) because GitHub tags
+        # are mutable. If the maintainer's account is compromised and the
+        # tag gets re-pushed to a malicious commit, any @v2.6.1 reference
+        # picks it up. A SHA can't be retargeted. To upgrade, resolve the
+        # new tag with: gh api repos/contributor-assistant/github-action/
+        # git/refs/tags/vX.Y.Z --jq '.object.sha'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PERSONAL_ACCESS_TOKEN is intentionally omitted — signatures are
