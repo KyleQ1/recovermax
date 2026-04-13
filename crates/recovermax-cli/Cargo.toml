@@ -17,5 +17,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1"
 bytesize = "2"
-indicatif = "0.17"
+indicatif = "0.18"
 console = "0.15"
