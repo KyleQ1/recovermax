@@ -1,0 +1,53 @@
+# Dependabot configuration.
+#
+# Keeps third-party dependencies fresh without us having to track
+# upstream releases manually. Each open PR needs a review + merge from
+# the maintainer — Dependabot does not merge itself.
+#
+# Security rationale for this project specifically:
+# - The CLA workflow pins `contributor-assistant/github-action` to a
+#   commit SHA (not a tag) to defeat the re-tag attack. Dependabot
+#   understands SHA pins and opens PRs to bump them when a new version
+#   ships, with the SHA included in the PR body for review.
+# - Rust actions (dtolnay/rust-toolchain, Swatinem/rust-cache) and
+#   build-surface actions (checkout, upload-artifact) all run with
+#   write scopes at some point in CI — upstream compromise of any of
+#   them is a real risk that stale pins amplify.
+
+version: 2
+updates:
+  # GitHub Actions versions (ci.yml, release.yml, cla.yml).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      # Bundle routine version bumps so we don't get one PR per action
+      # every month. Security updates still come as individual PRs.
+      all-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Cargo crate versions for both workspace members.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    # Only non-major bumps routinely; major bumps come individually so
+    # we can inspect breaking changes without a noisy group PR.
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
