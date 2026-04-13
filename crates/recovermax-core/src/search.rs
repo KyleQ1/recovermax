@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -98,7 +97,7 @@ impl<'a> Searcher<'a> {
                 fs_index,
                 fs_info,
                 &root_entries,
-                PathBuf::new(),
+                "",
                 query,
                 options,
                 &mut matches,
@@ -131,12 +130,13 @@ impl<'a> Searcher<'a> {
                 {
                     match ext4.list_directory(deleted_inode.inode_num) {
                         Ok(entries) => {
+                            let orphan_subpath = format!("$OrphanFiles/{}", orphan_basename);
                             self.search_recursive(
                                 &ext4,
                                 fs_index,
                                 fs_info,
                                 &entries,
-                                PathBuf::from("$OrphanFiles").join(&orphan_basename),
+                                &orphan_subpath,
                                 query,
                                 options,
                                 &mut matches,
@@ -187,6 +187,12 @@ impl<'a> Searcher<'a> {
         session.search(query, options)
     }
 
+    /// `current_path` is the /-separated session-path fragment relative to
+    /// the filesystem root ("" for root, "$OrphanFiles/OrphanFile-13" when
+    /// descending into an orphan directory). Kept as a string — not a
+    /// PathBuf — so separators are platform-independent. PathBuf::join
+    /// produced `\` segments on Windows which broke downstream path
+    /// comparisons.
     #[allow(clippy::too_many_arguments)]
     fn search_recursive(
         &self,
@@ -194,7 +200,7 @@ impl<'a> Searcher<'a> {
         filesystem_index: usize,
         fs_info: &FsInfo,
         entries: &[DirEntry],
-        current_path: PathBuf,
+        current_path: &str,
         query: &str,
         options: &SearchOptions,
         matches: &mut Vec<SearchMatch>,
@@ -210,8 +216,12 @@ impl<'a> Searcher<'a> {
                 continue;
             }
 
-            let entry_path = current_path.join(&entry.name);
-            let absolute_path = format!("/{}", entry_path.display());
+            let entry_path = if current_path.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", current_path, entry.name)
+            };
+            let absolute_path = format!("/{}", entry_path);
 
             if path_matches(query, &entry.name, &absolute_path, options) {
                 matches.push(SearchMatch {
@@ -238,7 +248,7 @@ impl<'a> Searcher<'a> {
                             filesystem_index,
                             fs_info,
                             &sub_entries,
-                            entry_path,
+                            &entry_path,
                             query,
                             options,
                             matches,

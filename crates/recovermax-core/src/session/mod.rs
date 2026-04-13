@@ -881,7 +881,7 @@ fn build_filesystem_sessions(
                         &ext4,
                         filesystem_index,
                         root_id,
-                        PathBuf::new(),
+                        "",
                         &root_entries,
                         &mut visited_dirs,
                         &mut next_node_id,
@@ -1730,12 +1730,17 @@ fn raw_inode_table_scan(
     Ok(())
 }
 
+/// `parent_path` is the /-separated session-path fragment rooted at the
+/// filesystem (empty string for the filesystem root; "$OrphanFiles/..." for
+/// deleted-orphan subtrees). Stored as a string — not a PathBuf — because
+/// the resulting SessionNode.path is user-facing and must stay forward-
+/// slash-separated on every platform.
 #[allow(clippy::too_many_arguments)]
 fn build_ext4_subtree(
     ext4: &Ext4Fs<'_>,
     filesystem_index: usize,
     parent_id: u64,
-    parent_path: PathBuf,
+    parent_path: &str,
     entries: &[crate::fs::DirEntry],
     visited_dirs: &mut HashSet<u64>,
     next_node_id: &mut u64,
@@ -1753,8 +1758,12 @@ fn build_ext4_subtree(
             continue;
         }
 
-        let path_buf = parent_path.join(&entry.name);
-        let normalized_path = format!("/{}", path_buf.display());
+        let entry_path = if parent_path.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{}/{}", parent_path, entry.name)
+        };
+        let normalized_path = format!("/{}", entry_path);
         let mut file_type = entry.file_type;
         let mut size = if entry.size > 0 {
             Some(entry.size)
@@ -1815,7 +1824,7 @@ fn build_ext4_subtree(
                         ext4,
                         filesystem_index,
                         node_id,
-                        path_buf,
+                        &entry_path,
                         &children,
                         visited_dirs,
                         next_node_id,
@@ -2100,11 +2109,12 @@ fn append_ext4_deleted_orphans(
             let subtree_start = nodes.len();
             match ext4.list_directory(orphan.inode_num) {
                 Ok(children) => {
+                    let orphan_subpath = format!("$OrphanFiles/{}", orphan_basename);
                     if let Err(err) = build_ext4_subtree(
                         ext4,
                         filesystem_index,
                         node_id,
-                        PathBuf::from("$OrphanFiles").join(&orphan_basename),
+                        &orphan_subpath,
                         &children,
                         &mut visited_dirs,
                         next_node_id,
