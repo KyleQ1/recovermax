@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
-use indicatif::ProgressBar;
 
 use recovermax_core::carve;
 use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
@@ -13,7 +12,7 @@ use recovermax_core::fs::ext4::{DeletedInode, Ext4Fs};
 use recovermax_core::fs::{EntrySource, FileType};
 use recovermax_core::io::ImageReader;
 use recovermax_core::recover;
-use recovermax_core::scan::{ScanEvent, ScanOptions, ScanPhase, Scanner};
+use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions, Searcher};
 use recovermax_core::session::{
     CacheSummary, FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, SessionNode,
@@ -444,9 +443,6 @@ pub fn run(args: Args) -> Result<()> {
                 if is_binary_scn(sf) {
                     let bs = BinarySession::open(&image, sf)?;
                     let node = bs.resolve_node(fs, &path)?;
-                    // Walk tree via ScnReader
-                    let children = bs.list_children(node.filesystem_index, &node.path)?;
-                    let artifact = RecoverySessionArtifact::from_report(&image, bs.report.clone());
                     // Simple tree print from ScnReader
                     print_binary_tree(&bs, node.filesystem_index, &node.path, depth, 0);
                     return Ok(());
@@ -830,181 +826,6 @@ fn run_info(image: &Path) -> Result<()> {
 // Scan visualization
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
-enum BlockStatus {
-    Unscanned,
-    ScannedEmpty,
-    Ext4,
-    Ntfs,
-    Lvm,
-    FileSignature,
-}
-
-struct ScanDisplay {
-    image_size: u64,
-    current_phase: ScanPhase,
-    phase_total_bytes: u64,
-    bytes_scanned: u64,
-    phase_start_time: Instant,
-    filesystems_found: Vec<(String, u64, u64)>,
-    file_types_found: usize,
-    block_map: Vec<BlockStatus>,
-}
-
-impl ScanDisplay {
-    fn new(image_size: u64, width: usize) -> Self {
-        Self {
-            image_size,
-            current_phase: ScanPhase::Standard,
-            phase_total_bytes: image_size,
-            bytes_scanned: 0,
-            phase_start_time: Instant::now(),
-            filesystems_found: Vec::new(),
-            file_types_found: 0,
-            block_map: vec![BlockStatus::Unscanned; width],
-        }
-    }
-
-    fn handle_event(&mut self, event: &ScanEvent) {
-        match event {
-            ScanEvent::PhaseStarted { phase, total_bytes } => {
-                self.current_phase = *phase;
-                self.phase_total_bytes = *total_bytes;
-                self.bytes_scanned = 0;
-                self.phase_start_time = Instant::now();
-            }
-            ScanEvent::Progress { offset, bytes_scanned, .. } => {
-                self.bytes_scanned = *bytes_scanned;
-                let bucket = self.offset_to_bucket(*offset);
-                if bucket < self.block_map.len()
-                    && self.block_map[bucket] == BlockStatus::Unscanned
-                {
-                    self.block_map[bucket] = BlockStatus::ScannedEmpty;
-                }
-            }
-            ScanEvent::FilesystemFound { fs_type, label, offset, size } => {
-                self.filesystems_found.push((fs_type.clone(), *offset, *size));
-                let status = match fs_type.as_str() {
-                    "ext4" => BlockStatus::Ext4,
-                    "ntfs" => BlockStatus::Ntfs,
-                    _ => BlockStatus::Lvm,
-                };
-                let start_bucket = self.offset_to_bucket(*offset);
-                let end_bucket = self.offset_to_bucket(offset + size);
-                for b in start_bucket..=end_bucket.min(self.block_map.len().saturating_sub(1)) {
-                    self.block_map[b] = status;
-                }
-                let _ = label; // used in event, not needed in display state
-            }
-            ScanEvent::FileTypeFound { .. } => {
-                self.file_types_found += 1;
-            }
-            ScanEvent::PhaseComplete { .. } => {}
-            ScanEvent::TreeBuildStarted { .. } => {
-                self.current_phase = ScanPhase::TreeBuilding;
-                self.bytes_scanned = 0;
-                // phase_total_bytes stays as image_size from PhaseStarted
-                self.phase_total_bytes = self.image_size;
-                self.phase_start_time = Instant::now();
-            }
-            ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } => {
-                self.bytes_scanned = (*files_found + *dirs_found) as u64;
-                if *bytes_offset > 0 {
-                    // Use actual disk offset for progress bar position
-                    self.phase_total_bytes = self.image_size;
-                }
-            }
-            ScanEvent::TreeBuildComplete { total_nodes, .. } => {
-                self.bytes_scanned = *total_nodes as u64;
-            }
-        }
-    }
-
-    fn offset_to_bucket(&self, offset: u64) -> usize {
-        if self.image_size == 0 {
-            return 0;
-        }
-        let bucket = (offset as u128 * self.block_map.len() as u128 / self.image_size as u128) as usize;
-        bucket.min(self.block_map.len().saturating_sub(1))
-    }
-
-    fn render_block_map(&self) -> String {
-        self.block_map
-            .iter()
-            .map(|status| match status {
-                BlockStatus::Unscanned => "\x1b[90m░\x1b[0m",
-                BlockStatus::ScannedEmpty => "\x1b[37m█\x1b[0m",
-                BlockStatus::Ext4 => "\x1b[32m▓\x1b[0m",
-                BlockStatus::Ntfs => "\x1b[34m▓\x1b[0m",
-                BlockStatus::Lvm => "\x1b[35m▓\x1b[0m",
-                BlockStatus::FileSignature => "\x1b[33m▓\x1b[0m",
-            })
-            .collect()
-    }
-
-    fn phase_name(&self) -> &'static str {
-        match self.current_phase {
-            ScanPhase::Standard => "Standard scan",
-            ScanPhase::PeBoundary => "PE-boundary scan",
-            ScanPhase::DeepScan => "Deep scan",
-            ScanPhase::TreeBuilding => "Building file tree",
-        }
-    }
-
-    fn speed_str(&self) -> String {
-        let elapsed = self.phase_start_time.elapsed().as_secs_f64();
-        if elapsed < 0.1 {
-            return String::new();
-        }
-        let speed = self.bytes_scanned as f64 / elapsed;
-        if self.current_phase == ScanPhase::TreeBuilding {
-            // Show inode table read speed as MiB/s (each entry reads ~256 bytes of inode data)
-            let data_speed = speed * 256.0;
-            format!(" @ {}/s", bytesize::ByteSize(data_speed as u64))
-        } else {
-            format!(" @ {}/s", bytesize::ByteSize(speed as u64))
-        }
-    }
-
-    fn eta_str(&self) -> String {
-        let elapsed = self.phase_start_time.elapsed().as_secs_f64();
-        if elapsed < 1.0 || self.bytes_scanned == 0 || self.phase_total_bytes == 0 {
-            return String::new();
-        }
-        let rate = self.bytes_scanned as f64 / elapsed;
-        let remaining = self.phase_total_bytes.saturating_sub(self.bytes_scanned) as f64;
-        let eta_secs = (remaining / rate) as u64;
-        if eta_secs < 60 {
-            format!(" | ETA: {}s", eta_secs)
-        } else if eta_secs < 3600 {
-            format!(" | ETA: {}m{}s", eta_secs / 60, eta_secs % 60)
-        } else {
-            format!(" | ETA: {}h{}m", eta_secs / 3600, (eta_secs % 3600) / 60)
-        }
-    }
-
-    fn fs_summary(&self) -> String {
-        if self.filesystems_found.is_empty() {
-            return "0".to_string();
-        }
-        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for (fs_type, _, _) in &self.filesystems_found {
-            *counts.entry(fs_type.as_str()).or_default() += 1;
-        }
-        let parts: Vec<String> = counts
-            .iter()
-            .map(|(t, c)| {
-                if *c == 1 {
-                    t.to_string()
-                } else {
-                    format!("{}x{}", t, c)
-                }
-            })
-            .collect();
-        format!("{} [{}]", self.filesystems_found.len(), parts.join(", "))
-    }
-}
-
 fn parse_byte_offset(s: &str) -> Result<u64> {
     let s = s.trim();
     let (num_part, multiplier) = if s.ends_with('T') || s.ends_with('t') {
@@ -1189,7 +1010,6 @@ fn run_scan(
         };
 
         RecoverySessionArtifact::build_binary_scn(
-            image,
             &reader,
             &report,
             path,
@@ -1232,16 +1052,6 @@ fn format_count(n: u64) -> String {
     } else {
         format!("{}", n)
     }
-}
-
-fn save_metadata_scn(report: &recovermax_core::scan::ScanReport, path: &Path) -> Result<()> {
-    use recovermax_core::session::compact_tree::CompactTree;
-
-    let mut tree = CompactTree::new();
-    tree.filesystem_count = report.filesystems.len() as u16;
-    let metadata = serde_json::to_string(report)?;
-    tree.save_to_binary(path, &metadata)?;
-    Ok(())
 }
 
 fn run_raw_scan(image: &Path, output: &Path, start: &str, end: Option<&str>) -> Result<()> {
@@ -1384,7 +1194,6 @@ fn select_deleted_filesystem(
 /// all nodes into RAM. ~50 MB vs ~3.4 GB for 12M nodes.
 struct BinarySession {
     scn: recovermax_core::session::binary_reader::ScnReader,
-    reader: ImageReader,
     report: recovermax_core::scan::ScanReport,
 }
 
@@ -1414,7 +1223,7 @@ impl BinarySession {
             scn_path.display(),
         );
 
-        Ok(Self { scn, reader, report })
+        Ok(Self { scn, report })
     }
 
     fn resolve_node(&self, fs: Option<usize>, target: &str) -> Result<SessionNode> {

@@ -11,8 +11,6 @@ use memmap2::Mmap;
 
 use super::binary_format::*;
 use super::SessionNode;
-use crate::fs::{EntrySource, FileType, FsInfo};
-use crate::scan::ScanReport;
 use crate::search::{SearchMatch, SearchOptions};
 use crate::session::SessionNodeTimestamps;
 
@@ -66,16 +64,6 @@ impl ScnReader {
         let start = self.header.string_table_offset as usize;
         let size = self.header.string_table_size as usize;
         if start == 0 || size == 0 || start + size > self.mmap.len() {
-            return &[];
-        }
-        &self.mmap[start..start + size]
-    }
-
-    fn nodes_raw(&self) -> &[u8] {
-        let start = self.header.node_records_offset as usize;
-        let count = self.header.node_count as usize;
-        let size = count * NODE_SIZE;
-        if start + size > self.mmap.len() {
             return &[];
         }
         &self.mmap[start..start + size]
@@ -443,6 +431,7 @@ fn nonzero_ts(value: u32) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::{EntrySource, FileType};
     use crate::session::binary_writer::ScnWriter;
     use tempfile::NamedTempFile;
 

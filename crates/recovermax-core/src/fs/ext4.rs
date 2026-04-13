@@ -74,23 +74,6 @@ impl Ext4Superblock {
     }
 }
 
-/// Common backup superblock offsets to try when the primary is corrupt.
-/// Assumes default ext4 parameters (block_size=4096, blocks_per_group=32768).
-const BACKUP_SUPERBLOCK_OFFSETS: &[u64] = &[
-    // Group 1: 4096 * 32768 + 1024 = 128 MiB + 1024
-    128 * 1024 * 1024 + 1024,
-    // Group 3: 384 MiB + 1024
-    3 * 128 * 1024 * 1024 + 1024,
-    // Group 5: 640 MiB + 1024
-    5 * 128 * 1024 * 1024 + 1024,
-    // Group 7: 896 MiB + 1024
-    7 * 128 * 1024 * 1024 + 1024,
-    // Group 9: 1152 MiB + 1024
-    9 * 128 * 1024 * 1024 + 1024,
-    // 1K block_size, blocks_per_group=8192 → group 1 at 8 MiB + 1024
-    8 * 1024 * 1024 + 1024,
-];
-
 /// Result of superblock parsing — includes which block group the superblock was found in.
 struct SuperblockResult {
     superblock: Ext4Superblock,
