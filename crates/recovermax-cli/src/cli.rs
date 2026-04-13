@@ -6,7 +6,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 
 use recovermax_core::carve;
-use recovermax_core::forensic::{AuditAction, AuditLog, CaseInfo, ForensicReport, ImageHasher};
+use recovermax_core::forensic::{
+    start_image_audit, AuditAction, ForensicIdentity, ForensicReport, ImageAudit, ImageHasher,
+};
 use recovermax_core::fs::ext4::{DeletedInode, Ext4Fs};
 use recovermax_core::fs::{EntrySource, FileType};
 use recovermax_core::io::ImageReader;
@@ -519,39 +521,24 @@ pub fn run(args: Args) -> Result<()> {
         } => {
             let forensic_mode = audit_log.is_some() || report.is_some() || hash_image;
 
-            let mut audit = if forensic_mode {
-                let case_info = CaseInfo {
-                    examiner: examiner.unwrap_or_else(|| "Unknown".into()),
-                    case_number: case_number.unwrap_or_else(|| "N/A".into()),
-                    evidence_id: evidence_id.unwrap_or_else(|| "N/A".into()),
-                    description: format!("Recovery from {}", image.display()),
-                };
-                Some(AuditLog::new(case_info))
-            } else {
-                None
-            };
-
-            let image_hash = if hash_image {
+            if hash_image {
                 println!("Hashing source image (SHA-256)...");
-                let hash = ImageHasher::hash_file(&image)?;
-                println!("Pre-recovery hash: {}", hash);
-                if let Some(ref mut log) = audit {
-                    log.log(AuditAction::ImageOpened {
-                        path: image.display().to_string(),
-                        size: std::fs::metadata(&image)?.len(),
-                        sha256: Some(hash.clone()),
-                    });
+            }
+
+            let (mut audit, image_hash) = if forensic_mode {
+                let identity = ForensicIdentity {
+                    examiner: examiner.clone(),
+                    case_number: case_number.clone(),
+                    evidence_id: evidence_id.clone(),
+                };
+                let ImageAudit { log, pre_hash } =
+                    start_image_audit(&image, identity, hash_image)?;
+                if let Some(ref hash) = pre_hash {
+                    println!("Pre-recovery hash: {}", hash);
                 }
-                Some(hash)
+                (Some(log), pre_hash)
             } else {
-                if let Some(ref mut log) = audit {
-                    log.log(AuditAction::ImageOpened {
-                        path: image.display().to_string(),
-                        size: std::fs::metadata(&image)?.len(),
-                        sha256: None,
-                    });
-                }
-                None
+                (None, None)
             };
 
             let mut session = open_session_for_image(
