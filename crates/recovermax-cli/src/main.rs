@@ -29,8 +29,13 @@ struct TopLevel {
 }
 
 fn main() -> Result<()> {
+    // RUST_LOG wins when set; otherwise keep warn-level output visible so
+    // core library warnings (session size mismatch, corrupt metadata, etc.)
+    // reach the user without them having to opt in.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
         .init();
 
     let args = TopLevel::parse();

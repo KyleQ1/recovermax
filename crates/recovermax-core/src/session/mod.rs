@@ -2,6 +2,12 @@ pub mod binary_format;
 pub mod binary_reader;
 pub mod binary_writer;
 pub mod compact_tree;
+pub mod open;
+
+pub use open::{
+    browse_session_for_image, build_live_session_artifact, is_binary_scn, open_session,
+    open_session_for_image, open_session_from_saved, parse_memory_budget,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

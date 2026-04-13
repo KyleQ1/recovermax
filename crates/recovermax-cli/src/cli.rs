@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -15,7 +14,8 @@ use recovermax_core::recover;
 use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions, Searcher};
 use recovermax_core::session::{
-    CacheSummary, FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, SessionNode,
+    is_binary_scn, open_session_for_image, open_session_from_saved, CacheSummary,
+    FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, SessionNode,
     SessionNodeTimestamps, SessionTreeEntry,
 };
 
@@ -382,7 +382,7 @@ pub fn run(args: Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            let session = open_session(
+            let session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -413,7 +413,7 @@ pub fn run(args: Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            let mut session = open_session(
+            let mut session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -448,7 +448,7 @@ pub fn run(args: Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            let mut session = open_session(
+            let mut session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -475,7 +475,7 @@ pub fn run(args: Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            let mut session = open_session(
+            let mut session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -493,7 +493,7 @@ pub fn run(args: Args) -> Result<()> {
             path,
             memory_budget,
         } => {
-            let session = open_session(
+            let session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -554,7 +554,7 @@ pub fn run(args: Args) -> Result<()> {
                 None
             };
 
-            let mut session = open_session(
+            let mut session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -634,7 +634,7 @@ pub fn run(args: Args) -> Result<()> {
                     return Ok(());
                 }
             }
-            let mut session = open_session(
+            let mut session = open_session_for_image(
                 &image,
                 scan_file.as_deref(),
                 memory_budget.as_deref(),
@@ -655,7 +655,7 @@ pub fn run(args: Args) -> Result<()> {
             memory_budget,
         } => {
             let mut session =
-                open_session_from_saved_session(&scan_file, memory_budget.as_deref(), true)?;
+                open_session_from_saved(&scan_file, memory_budget.as_deref(), true)?;
             warm_session_caches(&mut session)?;
             print_cache_summary("cache", &session.cache_summary());
             Ok(())
@@ -665,7 +665,7 @@ pub fn run(args: Args) -> Result<()> {
             memory_budget,
         } => {
             let mut session =
-                open_session_from_saved_session(&scan_file, memory_budget.as_deref(), true)?;
+                open_session_from_saved(&scan_file, memory_budget.as_deref(), true)?;
             warm_session_caches(&mut session)?;
             println!("Before unload:");
             print_cache_summary("cache", &session.cache_summary());
@@ -1276,192 +1276,6 @@ impl BinarySession {
     }
 }
 
-fn is_binary_scn(path: &Path) -> bool {
-    if let Ok(data) = std::fs::read(path) {
-        data.len() >= 8 && &data[0..8] == b"RMXSCAN\0"
-    } else {
-        false
-    }
-}
-
-fn open_session(
-    image: &Path,
-    scan_file: Option<&Path>,
-    memory_budget: Option<&str>,
-    require_tree: bool,
-) -> Result<RecoverySession> {
-    let reader = ImageReader::open(image)?;
-
-    // Check for binary .scn format
-    if let Some(scan_file) = scan_file {
-        if is_binary_scn(scan_file) {
-            let scn_reader =
-                recovermax_core::session::binary_reader::ScnReader::open(scan_file)?;
-
-            // Validate image size matches
-            if let Some(meta_json) = scn_reader.metadata_json() {
-                if let Ok(report) = serde_json::from_str::<recovermax_core::scan::ScanReport>(meta_json) {
-                    if report.image_size != reader.len() {
-                        eprintln!(
-                            "Warning: Session was created from a {} image but this image is {}.",
-                            bytesize::ByteSize(report.image_size),
-                            bytesize::ByteSize(reader.len()),
-                        );
-                    }
-                }
-            }
-
-            // Build a RecoverySessionArtifact from the binary reader
-            let node_count = scn_reader.node_count();
-            println!(
-                "Loaded binary session: {} nodes from {}",
-                node_count,
-                scan_file.display()
-            );
-
-            // Convert binary nodes to SessionNode vec for the existing session system
-            // This is O(n) but avoids rewriting all downstream code
-            let mut fs_nodes: HashMap<u16, Vec<SessionNode>> = HashMap::new();
-            for i in 0..node_count as u32 {
-                if let Some(node) = scn_reader.to_session_node(i) {
-                    fs_nodes
-                        .entry(scn_reader.get_compact_node(i).unwrap().filesystem_index)
-                        .or_default()
-                        .push(node);
-                }
-            }
-
-            // Build artifact from binary data
-            let report = if let Some(meta_json) = scn_reader.metadata_json() {
-                serde_json::from_str(meta_json).unwrap_or_else(|_| {
-                    recovermax_core::scan::ScanReport {
-                        image_size: reader.len(),
-                        partitions: Vec::new(),
-                        filesystems: Vec::new(),
-                    }
-                })
-            } else {
-                recovermax_core::scan::ScanReport {
-                    image_size: reader.len(),
-                    partitions: Vec::new(),
-                    filesystems: Vec::new(),
-                }
-            };
-
-            let warnings: Vec<String> = scn_reader
-                .warnings_json()
-                .and_then(|w| serde_json::from_str(w).ok())
-                .unwrap_or_default();
-
-            let mut filesystems = Vec::new();
-            for (i, fs_info) in report.filesystems.iter().enumerate() {
-                let nodes = fs_nodes.remove(&(i as u16)).unwrap_or_default();
-                let root_node_id = nodes.first().map(|n| n.id);
-                filesystems.push(FilesystemSessionArtifact {
-                    filesystem_index: i,
-                    fs_info: fs_info.clone(),
-                    root_node_id,
-                    warnings: warnings.clone(),
-                    nodes,
-                });
-            }
-
-            let artifact = RecoverySessionArtifact {
-                version: RecoverySessionArtifact::VERSION,
-                source: recovermax_core::session::ScanImageSource {
-                    path: image.to_path_buf(),
-                    image_size: reader.len(),
-                },
-                report,
-                filesystems,
-            };
-
-            let explicit_budget = parse_memory_budget(memory_budget)?;
-            return Ok(RecoverySession::from_artifact_with_reader(
-                artifact,
-                reader,
-                explicit_budget,
-            ));
-        }
-    }
-
-    let mut artifact = if let Some(scan_file) = scan_file {
-        let artifact = RecoverySessionArtifact::load_from_path(scan_file)?;
-        artifact.validate_for_image_with_artifact_path(image, reader.len(), Some(scan_file))?;
-        artifact
-    } else {
-        build_live_session_artifact(image, &reader)?
-    };
-
-    if require_tree && !artifact.filesystems.iter().any(|fs| fs.has_tree()) {
-        artifact = build_live_session_artifact(image, &reader)?;
-    }
-
-    let explicit_budget = parse_memory_budget(memory_budget)?;
-    Ok(RecoverySession::from_artifact_with_reader(
-        artifact,
-        reader,
-        explicit_budget,
-    ))
-}
-
-fn open_session_from_saved_session(
-    scan_file: &Path,
-    memory_budget: Option<&str>,
-    require_tree: bool,
-) -> Result<RecoverySession> {
-    let artifact = RecoverySessionArtifact::load_from_path(scan_file)?;
-    let image_path = artifact
-        .resolved_source_path(Some(scan_file))
-        .as_deref()
-        .context("saved session does not record a source image path")?
-        .to_path_buf();
-
-    let reader = ImageReader::open(&image_path)?;
-    artifact.validate_for_image_with_artifact_path(&image_path, reader.len(), Some(scan_file))?;
-
-    let mut artifact = artifact;
-    if require_tree && !artifact.filesystems.iter().any(|fs| fs.has_tree()) {
-        artifact = build_live_session_artifact(&image_path, &reader)?;
-    }
-
-    let explicit_budget = parse_memory_budget(memory_budget)?;
-    Ok(RecoverySession::from_artifact_with_reader(
-        artifact,
-        reader,
-        explicit_budget,
-    ))
-}
-
-fn build_live_session_artifact(
-    image: &Path,
-    reader: &ImageReader,
-) -> Result<RecoverySessionArtifact> {
-    let scanner = Scanner::new(reader);
-    let report = scanner.full_scan()?;
-    RecoverySessionArtifact::from_scan(image, reader, report)
-}
-
-fn parse_memory_budget(memory_budget: Option<&str>) -> Result<Option<u64>> {
-    match memory_budget {
-        None => Ok(None),
-        Some(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Ok(None);
-            }
-
-            if let Ok(parsed) = trimmed.parse::<bytesize::ByteSize>() {
-                return Ok(Some(parsed.as_u64()));
-            }
-
-            let bytes = trimmed
-                .parse::<u64>()
-                .with_context(|| format!("invalid memory budget {}", value))?;
-            Ok(Some(bytes))
-        }
-    }
-}
 
 fn resolve_node_for_session(
     session: &mut RecoverySession,
