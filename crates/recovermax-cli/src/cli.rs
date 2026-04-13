@@ -1860,7 +1860,7 @@ fn gather_sibling_context_from_session(
         median_dtime: if dtimes.is_empty() {
             None
         } else {
-            Some(median_i64(&dtimes))
+            Some(recovermax_core::recover::scoring::median_sorted_i64(&dtimes))
         },
         inode_range: if inodes.is_empty() {
             None
@@ -1922,7 +1922,7 @@ fn gather_sibling_context_live(
         median_dtime: if dtimes.is_empty() {
             None
         } else {
-            Some(median_i64(&dtimes))
+            Some(recovermax_core::recover::scoring::median_sorted_i64(&dtimes))
         },
         inode_range: if inodes.is_empty() {
             None
@@ -1932,120 +1932,8 @@ fn gather_sibling_context_live(
     }
 }
 
-fn median_i64(sorted: &[i64]) -> i64 {
-    let n = sorted.len();
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2
-    }
-}
-
-// --- Individual scoring functions (each returns 0.0–1.0) ---
-
-const DTIME_EXACT_THRESHOLD_SECS: f64 = 2.0;
-const DTIME_MAX_DISTANCE_SECS: f64 = 3600.0;
-
-fn score_dtime_proximity(candidate: &SessionNode, sibling_median_dtime: i64) -> f64 {
-    let candidate_dtime = match candidate
-        .timestamps
-        .as_ref()
-        .and_then(|ts| ts.deleted_unix)
-    {
-        Some(dt) => dt,
-        None => return 0.0,
-    };
-    let distance = (candidate_dtime - sibling_median_dtime).unsigned_abs() as f64;
-    if distance <= DTIME_EXACT_THRESHOLD_SECS {
-        return 1.0;
-    }
-    if distance >= DTIME_MAX_DISTANCE_SECS {
-        return 0.0;
-    }
-    1.0 - (distance - DTIME_EXACT_THRESHOLD_SECS)
-        / (DTIME_MAX_DISTANCE_SECS - DTIME_EXACT_THRESHOLD_SECS)
-}
-
-fn score_block_group_locality(
-    candidate_inode: u64,
-    parent_inode: u64,
-    inodes_per_group: u32,
-) -> f64 {
-    let ipg = inodes_per_group as u64;
-    if ipg == 0 {
-        return 0.0;
-    }
-    let candidate_group = (candidate_inode.saturating_sub(1)) / ipg;
-    let parent_group = (parent_inode.saturating_sub(1)) / ipg;
-    if candidate_group == parent_group {
-        1.0
-    } else {
-        0.0
-    }
-}
-
-fn score_inode_range_proximity(
-    candidate_inode: u64,
-    inode_range: (u64, u64),
-) -> f64 {
-    let (min_ino, max_ino) = inode_range;
-    if candidate_inode >= min_ino && candidate_inode <= max_ino {
-        return 1.0;
-    }
-    let distance = if candidate_inode < min_ino {
-        min_ino - candidate_inode
-    } else {
-        candidate_inode - max_ino
-    };
-    let span = max_ino.saturating_sub(min_ino).max(1) as f64;
-    let normalized = distance as f64 / span;
-    (1.0 - normalized).max(0.0)
-}
-
-fn score_size_reasonableness(candidate: &SessionNode, extension: Option<&str>) -> f64 {
-    let size = match candidate.size {
-        Some(s) => s,
-        None => return 0.5,
-    };
-    let ext = match extension {
-        Some(e) => e,
-        None => return 0.5,
-    };
-    match ext {
-        "txt" | "md" | "csv" | "log" | "json" | "xml" | "html" | "htm" | "rs" | "c" | "cpp"
-        | "h" | "toml" | "yaml" | "yml" | "py" | "js" | "ts" | "sh" | "conf" | "cfg" => {
-            if size <= 10_000_000 {
-                1.0
-            } else if size <= 100_000_000 {
-                0.7
-            } else if size <= 1_000_000_000 {
-                0.3
-            } else {
-                0.0
-            }
-        }
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" => {
-            if size <= 50_000_000 {
-                1.0
-            } else if size <= 500_000_000 {
-                0.5
-            } else {
-                0.0
-            }
-        }
-        "pdf" => {
-            if size <= 100_000_000 {
-                1.0
-            } else if size <= 1_000_000_000 {
-                0.5
-            } else {
-                0.0
-            }
-        }
-        "zip" | "tar" | "gz" | "xz" | "bz2" | "7z" | "rar" => 0.5,
-        _ => 0.5,
-    }
-}
+// Pure scoring primitives moved to `recovermax_core::recover::scoring`.
+// Weights, thresholds, and score_* functions are imported where needed.
 
 // --- Content-type narrowing (subset that matched extension) ---
 
@@ -2095,17 +1983,17 @@ fn content_type_narrowed_candidates(
 
 // --- Composite tiebreaker scoring ---
 
-const WEIGHT_DTIME: f64 = 3.0;
-const WEIGHT_BLOCK_GROUP: f64 = 2.0;
-const WEIGHT_INODE_RANGE: f64 = 2.0;
-const WEIGHT_SIZE: f64 = 1.0;
-const MIN_SCORE_GAP: f64 = 2.0;
-
 fn tiebreaker_scored_orphan_candidate(
     session: &RecoverySession,
     node: &SessionNode,
     candidates: &[SessionNode],
 ) -> Option<SessionNode> {
+    use recovermax_core::recover::scoring::{
+        score_block_group_locality, score_dtime_proximity, score_inode_range_proximity,
+        score_size_reasonableness, MIN_SCORE_GAP, WEIGHT_BLOCK_GROUP, WEIGHT_DTIME,
+        WEIGHT_INODE_RANGE, WEIGHT_SIZE,
+    };
+
     if candidates.len() < 2 {
         return candidates.first().cloned();
     }
@@ -3214,6 +3102,9 @@ mod tests {
 
     use recovermax_core::fs::FsInfo;
     use recovermax_core::io::ImageReader;
+    use recovermax_core::recover::scoring::{
+        score_block_group_locality, score_size_reasonableness,
+    };
     use recovermax_core::scan::{Partition, ScanReport};
     use recovermax_core::session::{
         FilesystemSessionArtifact, RecoverySession, RecoverySessionArtifact, ScanImageSource,
@@ -4851,117 +4742,6 @@ mod tests {
                 deleted_unix,
             }),
         }
-    }
-
-    #[test]
-    fn score_dtime_exact_match_returns_one() {
-        let candidate = make_orphan_candidate(10, 100, Some(1_700_000_100));
-        let score = score_dtime_proximity(&candidate, 1_700_000_100);
-        assert!((score - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_dtime_within_threshold_returns_one() {
-        let candidate = make_orphan_candidate(10, 100, Some(1_700_000_101));
-        let score = score_dtime_proximity(&candidate, 1_700_000_100);
-        assert!((score - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_dtime_at_1800s_returns_half() {
-        let candidate = make_orphan_candidate(10, 100, Some(1_700_001_900));
-        let score = score_dtime_proximity(&candidate, 1_700_000_100);
-        assert!((score - 0.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn score_dtime_beyond_3600s_returns_zero() {
-        let candidate = make_orphan_candidate(10, 100, Some(1_700_100_000));
-        let score = score_dtime_proximity(&candidate, 1_700_000_100);
-        assert!((score - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_dtime_no_timestamp_returns_zero() {
-        let candidate = make_orphan_candidate(10, 100, None);
-        let score = score_dtime_proximity(&candidate, 1_700_000_100);
-        assert!((score - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_block_group_same_returns_one() {
-        // inode 50, parent inode 100, inodes_per_group 128
-        // group(50) = (50-1)/128 = 0, group(100) = (100-1)/128 = 0
-        let score = score_block_group_locality(50, 100, 128);
-        assert!((score - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_block_group_different_returns_zero() {
-        // inode 200, parent inode 100, inodes_per_group 128
-        // group(200) = (200-1)/128 = 1, group(100) = (100-1)/128 = 0
-        let score = score_block_group_locality(200, 100, 128);
-        assert!((score - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_inode_inside_range_returns_one() {
-        let score = score_inode_range_proximity(95, (80, 100));
-        assert!((score - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_inode_outside_range_decays() {
-        // range is 80..100 (span=20), inode 120 is distance 20 from max
-        // normalized = 20/20 = 1.0, score = max(1.0 - 1.0, 0.0) = 0.0
-        let score = score_inode_range_proximity(120, (80, 100));
-        assert!((score - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_inode_slightly_outside_range() {
-        // range is 80..100 (span=20), inode 110 is distance 10 from max
-        // normalized = 10/20 = 0.5, score = 0.5
-        let score = score_inode_range_proximity(110, (80, 100));
-        assert!((score - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_size_text_small_returns_one() {
-        let candidate = make_orphan_candidate(10, 500, None);
-        let score = score_size_reasonableness(&candidate, Some("rs"));
-        assert!((score - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_size_text_huge_returns_zero() {
-        let candidate = make_orphan_candidate(10, 5_000_000_000, None);
-        let score = score_size_reasonableness(&candidate, Some("rs"));
-        assert!((score - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_size_unknown_extension_returns_neutral() {
-        let candidate = make_orphan_candidate(10, 500, None);
-        let score = score_size_reasonableness(&candidate, Some("xyz"));
-        assert!((score - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn score_size_no_extension_returns_neutral() {
-        let candidate = make_orphan_candidate(10, 500, None);
-        let score = score_size_reasonableness(&candidate, None);
-        assert!((score - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn median_i64_odd_length() {
-        assert_eq!(median_i64(&[1, 3, 5]), 3);
-    }
-
-    #[test]
-    fn median_i64_even_length() {
-        assert_eq!(median_i64(&[1, 3, 5, 7]), 4);
     }
 
     // -----------------------------------------------------------------------

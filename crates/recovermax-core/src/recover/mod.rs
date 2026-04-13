@@ -1,3 +1,5 @@
+pub mod scoring;
+
 use std::collections::HashSet;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
