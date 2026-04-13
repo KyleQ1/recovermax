@@ -1,0 +1,70 @@
+# Alarm if the CLA bot ever commits to anything other than the
+# signatures file.
+#
+# The cla-assistant workflow uses the default GITHUB_TOKEN with
+# `contents: write` on the whole repo — there's no way to scope it to
+# just `.github/cla-signatures/`. Normally that's fine because the
+# action itself only writes to its configured `path-to-signatures`,
+# but if the action is ever compromised (via tag retarget, supply
+# chain, or a CVE in the action code) the token could be abused to
+# touch other files. This workflow is a tripwire: on every push to
+# main, if the latest commit is by `github-actions[bot]` and touches
+# anything outside `.github/cla-signatures/`, the job fails and the
+# maintainer gets notified by GitHub's normal CI failure alerts.
+#
+# False positives (e.g. someone intentionally uses the bot for an
+# unrelated commit) should be rare. Real positives mean investigate
+# the action and rotate any secrets immediately.
+
+name: CLA Sentinel
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify-bot-commits-are-signatures-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the previous commit to diff against.
+          fetch-depth: 2
+
+      - name: Check latest commit
+        run: |
+          set -euo pipefail
+
+          author="$(git log -1 --pretty='%an')"
+          echo "Latest commit author: $author"
+
+          if [ "$author" != "github-actions[bot]" ]; then
+            echo "Human commit — nothing to verify."
+            exit 0
+          fi
+
+          # Bot commit — verify it touched only the signatures path.
+          changed_paths="$(git diff --name-only HEAD~1 HEAD)"
+          echo "Bot-touched paths:"
+          echo "$changed_paths"
+
+          unexpected="$(
+            echo "$changed_paths" \
+              | grep -v '^\.github/cla-signatures/' \
+              || true
+          )"
+
+          if [ -n "$unexpected" ]; then
+            echo
+            echo "::error::CLA bot touched files outside .github/cla-signatures/:"
+            echo "$unexpected"
+            echo
+            echo "Investigate: the bot's scope is signature recording only."
+            echo "Likely causes:"
+            echo "  1. contributor-assistant/github-action was compromised"
+            echo "  2. The workflow's path-to-signatures was misconfigured"
+            echo "  3. Someone manually pushed under the bot identity"
+            exit 1
+          fi
+
+          echo "OK: bot commit limited to signatures path."
