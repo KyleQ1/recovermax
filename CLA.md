@@ -69,8 +69,8 @@ Maintainer is under no obligation to merge or maintain your Contribution.
 
 By opening a pull request against this repository you are asked by the
 CLA-Assistant bot to sign this CLA. Signing is a one-time action per
-contributor. The signature record is maintained in a separate public
-repository so that the history is auditable.
+contributor. The signature record is maintained in this repository at
+`.github/cla-signatures/v1.json` so the history is publicly auditable.
 
 ## Questions
 

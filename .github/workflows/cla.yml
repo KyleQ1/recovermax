@@ -29,16 +29,14 @@ jobs:
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # SETUP REQUIRED: create a fine-grained PAT with `contents: write`
-          # on the signatures repo below, then add it as a repo secret named
-          # `CLA_SIGNATURES_TOKEN`.
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+          # PERSONAL_ACCESS_TOKEN is intentionally omitted — signatures are
+          # stored in this same repo under .github/cla-signatures/, so the
+          # default GITHUB_TOKEN is enough. If you ever split signatures to
+          # a dedicated repo for a tighter token blast-radius, add a PAT
+          # here and set remote-repository-name / remote-organization-name
+          # below.
         with:
-          path-to-signatures: 'signatures/v1/cla.json'
-          # SETUP REQUIRED: create an empty public repository
-          # (e.g. KyleQ1/recovermax-cla-signatures) and point this at it.
-          remote-repository-name: 'recovermax-cla-signatures'
-          remote-organization-name: 'KyleQ1'
+          path-to-signatures: '.github/cla-signatures/v1.json'
           branch: 'main'
           path-to-document: 'https://github.com/KyleQ1/recovermax/blob/main/CLA.md'
           allowlist: KyleQ1,dependabot[bot]
