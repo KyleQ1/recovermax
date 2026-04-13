@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)] // test fixtures favor direct indexing
+
 //! Tests for streaming recovery: stream_inode_data writes blocks to a Write sink
 //! incrementally instead of buffering the entire file in memory.
 
@@ -37,7 +39,7 @@ impl Ext4ImageBuilder {
     fn write_superblock(&mut self, label: &str) {
         let sb = 1024usize;
         let blocks = (self.data.len() / self.block_size as usize) as u32;
-        self.write_u32(sb + 0x00, self.inodes_per_group);
+        self.write_u32(sb, self.inodes_per_group);
         self.write_u32(sb + 0x04, blocks);
         self.write_u32(sb + 0x0C, blocks / 2);
         self.write_u32(sb + 0x10, self.inodes_per_group / 2);
@@ -505,13 +507,11 @@ fn stream_zero_byte_file() {
     let mut streamed = Vec::new();
     let result = fs.stream_inode_data(&inode, &mut streamed);
 
-    match result {
-        Ok(written) => {
-            assert_eq!(written, 0);
-            assert!(streamed.is_empty());
-        }
-        Err(_) => {} // acceptable for edge case
+    if let Ok(written) = result {
+        assert_eq!(written, 0);
+        assert!(streamed.is_empty());
     }
+    // Err is acceptable for this edge case.
 }
 
 // ===========================================================================

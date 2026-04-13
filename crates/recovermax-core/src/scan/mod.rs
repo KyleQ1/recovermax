@@ -506,7 +506,7 @@ impl<'a> Scanner<'a> {
             offset += step;
             bytes_scanned += step;
 
-            if bytes_scanned % (256 * 1024 * 1024) == 0 {
+            if bytes_scanned.is_multiple_of(256 * 1024 * 1024) {
                 Self::emit(options, ScanEvent::Progress {
                     phase: ScanPhase::DeepScan,
                     offset,
@@ -540,7 +540,7 @@ impl<'a> Scanner<'a> {
             offset += pe_size;
             bytes_scanned += pe_size;
 
-            if bytes_scanned % (256 * 1024 * 1024) == 0 {
+            if bytes_scanned.is_multiple_of(256 * 1024 * 1024) {
                 Self::emit(options, ScanEvent::Progress {
                     phase: ScanPhase::PeBoundary,
                     offset,

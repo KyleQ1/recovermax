@@ -29,7 +29,5 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Style lints run but are not gated; pre-existing clippy suggestions
-      # (is_multiple_of, div_ceil, Default impls, etc.) are tracked separately.
       - name: Clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings

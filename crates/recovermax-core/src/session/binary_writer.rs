@@ -95,7 +95,7 @@ impl ScnWriter {
         }
 
         // Auto-checkpoint periodically
-        if self.node_count % CHECKPOINT_INTERVAL == 0 {
+        if self.node_count.is_multiple_of(CHECKPOINT_INTERVAL) {
             self.write_checkpoint()?;
         }
 
@@ -148,6 +148,9 @@ impl ScnWriter {
     }
 
     /// Add a raw inode entry (used by append_ext4_all_inodes for direct byte-level scanning).
+    ///
+    /// 14 arguments map 1:1 to CompactNode fields — see CompactTree::add_node.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_raw_inode(
         &mut self,
         inode_num: u64,

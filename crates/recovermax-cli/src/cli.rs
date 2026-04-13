@@ -862,6 +862,7 @@ fn maybe_prompt_for_scn(image: &Path, image_size: u64, output: Option<PathBuf>) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scan(
     image: &Path,
     output: Option<PathBuf>,
@@ -1046,7 +1047,7 @@ fn run_raw_scan(image: &Path, output: &Path, start: &str, end: Option<&str>) -> 
 
     let start_offset = parse_byte_offset(start)?;
     let end_offset = end
-        .map(|s| parse_byte_offset(s))
+        .map(parse_byte_offset)
         .transpose()?
         .unwrap_or(reader.len());
 
@@ -1070,37 +1071,34 @@ fn run_raw_scan(image: &Path, output: &Path, start: &str, end: Option<&str>) -> 
     let start_time = Instant::now();
     let pb_clone = pb.clone();
     let callback = move |event: ScanEvent| {
-        match &event {
-            ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } => {
-                let scanned = bytes_offset.saturating_sub(start_offset);
-                pb_clone.set_position(scanned);
+        if let ScanEvent::TreeBuildProgress { files_found, dirs_found, bytes_offset, .. } = &event {
+            let scanned = bytes_offset.saturating_sub(start_offset);
+            pb_clone.set_position(scanned);
 
-                let elapsed_secs = start_time.elapsed().as_secs_f64();
-                let elapsed_str = format_duration(elapsed_secs);
+            let elapsed_secs = start_time.elapsed().as_secs_f64();
+            let elapsed_str = format_duration(elapsed_secs);
 
-                let speed = if elapsed_secs > 0.5 {
-                    scanned as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
+            let speed = if elapsed_secs > 0.5 {
+                scanned as f64 / elapsed_secs
+            } else {
+                0.0
+            };
 
-                let total = end_offset - start_offset;
-                let eta_str = if speed > 0.0 && scanned < total && elapsed_secs > 2.0 {
-                    let remaining = (total - scanned) as f64;
-                    let eta_secs = remaining / speed;
-                    format!(" | ETA: {}", format_duration(eta_secs))
-                } else {
-                    String::new()
-                };
+            let total = end_offset - start_offset;
+            let eta_str = if speed > 0.0 && scanned < total && elapsed_secs > 2.0 {
+                let remaining = (total - scanned) as f64;
+                let eta_secs = remaining / speed;
+                format!(" | ETA: {}", format_duration(eta_secs))
+            } else {
+                String::new()
+            };
 
-                pb_clone.set_message(format!(
-                    "| {}/s | {} inodes, {} dirs{} | Elapsed: {}",
-                    bytesize::ByteSize(speed as u64),
-                    files_found, dirs_found,
-                    eta_str, elapsed_str,
-                ));
-            }
-            _ => {}
+            pb_clone.set_message(format!(
+                "| {}/s | {} inodes, {} dirs{} | Elapsed: {}",
+                bytesize::ByteSize(speed as u64),
+                files_found, dirs_found,
+                eta_str, elapsed_str,
+            ));
         }
     };
 
@@ -2680,7 +2678,7 @@ mod tests {
                 let rec_len = if idx == entries.len() - 1 {
                     self.block_size - (pos - block_off)
                 } else {
-                    ((8 + name_bytes.len() + 3) / 4) * 4
+                    (8 + name_bytes.len()).div_ceil(4) * 4
                 };
 
                 self.write_u32(pos, inode);
@@ -4215,7 +4213,7 @@ mod tests {
                 deleted: true,
                 size: None,
                 source: EntrySource::DeletedSlack,
-                parent_inode: parent_inode,
+                parent_inode,
                 timestamps: None,
             },
             // $OrphanFiles dir

@@ -906,7 +906,7 @@ fn build_filesystem_sessions(
             basename: "/".to_string(),
             path: "/".to_string(),
             file_type: FileType::Directory,
-            deleted: root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
+            deleted: root_inode_ok.as_ref().is_some_and(|i| i.is_deleted()),
             size: root_inode_ok.as_ref().map(|i| i.size),
             source: EntrySource::Filesystem,
             parent_inode: None,
@@ -1089,7 +1089,7 @@ fn build_filesystem_sessions_binary(
             "/",
             filesystem_index as u16,
             FileType::Directory,
-            root_inode_ok.as_ref().map_or(false, |i| i.is_deleted()),
+            root_inode_ok.as_ref().is_some_and(|i| i.is_deleted()),
             EntrySource::Filesystem,
             root_inode_ok.as_ref().map_or(u64::MAX, |i| i.size),
             0,
@@ -1152,7 +1152,7 @@ fn stream_inode_table_scan(
     let inode_size = ext4.superblock.inode_size as usize;
     let inodes_per_group = ext4.superblock.inodes_per_group;
     let block_size = ext4.superblock.block_size() as usize;
-    let num_groups = (ext4.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+    let num_groups = ext4.superblock.inodes_count.div_ceil(inodes_per_group);
     let inodes_per_block = block_size / inode_size;
     let total_inodes = ext4.superblock.inodes_count as usize;
     let fs_total_bytes = ext4.superblock.total_size();
@@ -1173,7 +1173,7 @@ fn stream_inode_table_scan(
         }
 
         let inode_table_blocks =
-            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+            (inodes_per_group as usize * inode_size).div_ceil(block_size);
 
         for tbl_block in 0..inode_table_blocks {
             let abs_block = bg.inode_table + tbl_block as u64;
@@ -1213,7 +1213,7 @@ fn stream_inode_table_scan(
                     dir_inodes.push(inode_num);
                 }
 
-                if pass1_count % 100_000 == 0 {
+                if pass1_count.is_multiple_of(100_000) {
                     let bytes_offset = partition_offset
                         + (group as u64 * inodes_per_group as u64 * inode_size as u64);
                     if let Some(cb) = on_event {
@@ -1253,7 +1253,7 @@ fn stream_inode_table_scan(
             }
             dirs_read += 1;
         }
-        if dirs_read % 10_000 == 0 && dirs_read > 0 {
+        if dirs_read.is_multiple_of(10_000) && dirs_read > 0 {
             if let Some(cb) = on_event {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: filesystem_index as usize,
@@ -1309,7 +1309,7 @@ fn stream_inode_table_scan(
         }
 
         let inode_table_blocks =
-            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+            (inodes_per_group as usize * inode_size).div_ceil(block_size);
 
         for tbl_block in 0..inode_table_blocks {
             let abs_block = bg.inode_table + tbl_block as u64;
@@ -1398,7 +1398,7 @@ fn stream_inode_table_scan(
 
                 found += 1;
 
-                if found % 50000 == 0 {
+                if found.is_multiple_of(50000) {
                     let bytes_offset = partition_offset
                         + (group as u64 * inodes_per_group as u64 * inode_size as u64);
 
@@ -1410,7 +1410,7 @@ fn stream_inode_table_scan(
                             bytes_offset,
                         });
                     }
-                    if found % 200_000 == 0 {
+                    if found.is_multiple_of(200_000) {
                         reader.drop_cache();
                     }
                 }
@@ -1553,7 +1553,7 @@ fn raw_inode_table_scan(
                 continue;
             }
             let mtime = u32::from_le_bytes(data[16..20].try_into().unwrap_or([0; 4]));
-            if mtime >= TS_MIN && mtime <= TS_MAX {
+            if (TS_MIN..=TS_MAX).contains(&mtime) {
                 valid_count += 1;
             }
         }
@@ -1612,7 +1612,7 @@ fn raw_inode_table_scan(
 
         blocks_checked += num_blocks as u64;
 
-        if blocks_checked % 100_000 == 0 {
+        if blocks_checked.is_multiple_of(100_000) {
             if let Some(cb) = on_event {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: 0,
@@ -1621,7 +1621,7 @@ fn raw_inode_table_scan(
                     bytes_offset: offset + chunk_len as u64,
                 });
             }
-            if blocks_checked % 500_000 == 0 {
+            if blocks_checked.is_multiple_of(500_000) {
                 reader.drop_cache();
             }
         }
@@ -1674,7 +1674,7 @@ fn raw_inode_table_scan(
             }
         }
 
-        if dirs_read % 5_000 == 0 && dirs_read > 0 {
+        if dirs_read.is_multiple_of(5_000) && dirs_read > 0 {
             if let Some(cb) = on_event {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: 0,
@@ -1743,7 +1743,7 @@ fn raw_inode_table_scan(
         )?;
 
         written += 1;
-        if written % 50_000 == 0 {
+        if written.is_multiple_of(50_000) {
             if let Some(cb) = on_event {
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index: 0,
@@ -1752,7 +1752,7 @@ fn raw_inode_table_scan(
                     bytes_offset: ri.disk_offset,
                 });
             }
-            if written % 200_000 == 0 {
+            if written.is_multiple_of(200_000) {
                 reader.drop_cache();
             }
         }
@@ -1861,7 +1861,7 @@ fn build_ext4_subtree(
 
         // Emit tree build progress every 500 nodes
         if let Some(cb) = on_event {
-            if nodes.len() % 50000 == 0 {
+            if nodes.len().is_multiple_of(50000) {
                 let dirs = nodes.iter().filter(|n| n.file_type == FileType::Directory).count();
                 cb(crate::scan::ScanEvent::TreeBuildProgress {
                     filesystem_index,
@@ -1921,7 +1921,7 @@ fn append_ext4_all_inodes(
     let inode_size = ext4.superblock.inode_size as usize;
     let inodes_per_group = ext4.superblock.inodes_per_group;
     let block_size = ext4.superblock.block_size() as usize;
-    let num_groups = (ext4.superblock.inodes_count + inodes_per_group - 1) / inodes_per_group;
+    let num_groups = ext4.superblock.inodes_count.div_ceil(inodes_per_group);
     let inodes_per_block = block_size / inode_size;
 
     // Create a virtual directory for recovered files
@@ -1956,7 +1956,7 @@ fn append_ext4_all_inodes(
         }
 
         let inode_table_blocks =
-            (inodes_per_group as usize * inode_size + block_size - 1) / block_size;
+            (inodes_per_group as usize * inode_size).div_ceil(block_size);
 
         for tbl_block in 0..inode_table_blocks {
             let abs_block = bg.inode_table + tbl_block as u64;
@@ -2057,7 +2057,7 @@ fn append_ext4_all_inodes(
                 found_count += 1;
 
                 if let Some(cb) = on_event {
-                    if found_count % 50000 == 0 {
+                    if found_count.is_multiple_of(50000) {
                         cb(crate::scan::ScanEvent::TreeBuildProgress {
                             filesystem_index,
                             files_found: found_count,

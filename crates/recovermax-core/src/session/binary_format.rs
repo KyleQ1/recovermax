@@ -57,6 +57,12 @@ pub struct ScnHeader {
     pub _reserved2: [u8; 64],
 }
 
+impl Default for ScnHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScnHeader {
     pub fn new() -> Self {
         let mut header = Self::zeroed();

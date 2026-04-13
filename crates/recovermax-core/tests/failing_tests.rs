@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)] // test fixtures favor direct indexing
+
 //! Tests that are EXPECTED TO FAIL — they expose real bugs and missing features.
 //! As we fix each issue, move the test to the appropriate passing test file.
 
@@ -37,7 +39,7 @@ impl Ext4ImageBuilder {
     fn write_superblock(&mut self, label: &str) {
         let sb = 1024usize;
         let blocks = (self.data.len() / self.block_size as usize) as u32;
-        self.write_u32(sb + 0x00, self.inodes_per_group);
+        self.write_u32(sb, self.inodes_per_group);
         self.write_u32(sb + 0x04, blocks);
         self.write_u32(sb + 0x0C, blocks / 2);
         self.write_u32(sb + 0x10, self.inodes_per_group / 2);
@@ -112,7 +114,7 @@ impl Ext4ImageBuilder {
             let rec_len = if i == entries.len() - 1 {
                 self.block_size as usize - (pos - block_off)
             } else {
-                ((8 + name_len + 3) / 4) * 4
+                (8 + name_len).div_ceil(4) * 4
             };
             self.write_u32(pos, inode);
             self.write_u16(pos + 4, rec_len as u16);
@@ -276,7 +278,7 @@ fn symlink_recovery() {
 
     // symlink inode — in ext4, short symlinks store target in block_data
     let link_target = b"target.txt";
-    let index = (12 - 1) % 256;
+    let index = 12 - 1;
     let off = 3 * 4096 + index as usize * 256;
     builder.write_u16(off, 0xA000 | 0o777); // symlink mode
     builder.write_u32(off + 4, link_target.len() as u32);
@@ -514,7 +516,7 @@ fn recovery_continues_after_corrupt_directory() {
     builder.write_data(30, b"good");
 
     // bad_dir: inode with bad extent magic → will fail to read
-    let bad_index = (12 - 1) % 256;
+    let bad_index = 12 - 1;
     let bad_off = 3 * 4096 + bad_index as usize * 256;
     builder.write_u16(bad_off, 0x4000);
     builder.write_u32(bad_off + 4, 4096);

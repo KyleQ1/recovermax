@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)] // test fixtures favor direct indexing
+
 //! Complex ext4 tests that build realistic on-disk structures.
 //! These test the full chain: superblock → block group descriptors → inode table → extents → data.
 
@@ -54,7 +56,7 @@ impl Ext4ImageBuilder {
         let blocks = (self.data.len() / self.block_size as usize) as u32;
 
         // inodes_count
-        self.write_u32(sb + 0x00, self.inodes_per_group);
+        self.write_u32(sb, self.inodes_per_group);
         // blocks_count_lo
         self.write_u32(sb + 0x04, blocks);
         // free_blocks_lo
@@ -167,7 +169,7 @@ impl Ext4ImageBuilder {
                 self.block_size as usize - (pos - block_off)
             } else {
                 // Align to 4 bytes
-                ((8 + name_len + 3) / 4) * 4
+                (8 + name_len).div_ceil(4) * 4
             };
 
             self.write_u32(pos, inode);
@@ -1249,10 +1251,10 @@ fn read_zero_byte_file() {
 
     // Might crash or return empty — we just want no panic
     let result = fs.read_inode_data(&inode);
-    match result {
-        Ok(data) => assert_eq!(data.len(), 0),
-        Err(_) => {} // acceptable for now
+    if let Ok(data) = result {
+        assert_eq!(data.len(), 0);
     }
+    // Err is acceptable for now.
 }
 
 // ===========================================================================
@@ -1297,7 +1299,7 @@ fn gpt_with_ext4_partition_full_scan() {
 
     // Write ext4 superblock inside the partition
     let sb = partition_offset as usize + 1024;
-    img[sb + 0x00..sb + 0x04].copy_from_slice(&128u32.to_le_bytes());
+    img[sb..sb + 0x04].copy_from_slice(&128u32.to_le_bytes());
     img[sb + 0x04..sb + 0x08].copy_from_slice(&(partition_blocks as u32).to_le_bytes());
     img[sb + 0x14..sb + 0x18].copy_from_slice(&0u32.to_le_bytes());
     img[sb + 0x18..sb + 0x1C].copy_from_slice(&2u32.to_le_bytes()); // 4K blocks
@@ -1320,7 +1322,7 @@ fn gpt_with_ext4_partition_full_scan() {
     assert_eq!(report.partitions[0].name, "rootfs");
 
     assert!(
-        report.filesystems.len() >= 1,
+        !report.filesystems.is_empty(),
         "Should find ext4 on the partition"
     );
     let ext4_fs = report
@@ -1381,7 +1383,7 @@ fn ext4_with_1k_block_size() {
     let mut img = vec![0u8; size];
     let sb = 1024usize;
 
-    img[sb + 0x00..sb + 0x04].copy_from_slice(&64u32.to_le_bytes());
+    img[sb..sb + 0x04].copy_from_slice(&64u32.to_le_bytes());
     img[sb + 0x04..sb + 0x08].copy_from_slice(&256u32.to_le_bytes());
     img[sb + 0x14..sb + 0x18].copy_from_slice(&1u32.to_le_bytes()); // first_data_block=1 for 1K
     img[sb + 0x18..sb + 0x1C].copy_from_slice(&0u32.to_le_bytes()); // log_block_size=0 → 1024
@@ -1400,7 +1402,7 @@ fn ext4_with_1k_block_size() {
     img[bgdt + 8..bgdt + 12].copy_from_slice(&5u32.to_le_bytes());
 
     // Inode #2 (root dir) at block 5, index 1, inode_size=128
-    let inode_off = 5 * 1024 + 1 * 128; // inode 2 = index 1
+    let inode_off = 5 * 1024 + 128; // inode 2 = index 1
     img[inode_off] = 0x00;
     img[inode_off + 1] = 0x41; // mode = 0x4100 (dir)
     img[inode_off + 4..inode_off + 8].copy_from_slice(&1024u32.to_le_bytes()); // size

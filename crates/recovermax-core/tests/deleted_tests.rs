@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)] // test fixtures favor direct indexing
+
 //! Tests for deleted inode scanning.
 //!
 //! Builds ext4 images in-memory with inodes that have dtime set and/or
@@ -46,7 +48,7 @@ impl TestBuilder {
         let sb = 1024usize;
         let blocks = (self.data.len() / 4096) as u32;
 
-        self.put_u32(sb + 0x00, self.inodes_per_group); // inodes_count
+        self.put_u32(sb, self.inodes_per_group); // inodes_count
         self.put_u32(sb + 0x04, blocks); // blocks_count_lo
         self.put_u32(sb + 0x0C, blocks / 2); // free_blocks_lo
         self.put_u32(sb + 0x10, self.inodes_per_group / 2); // free_inodes_count
@@ -109,6 +111,7 @@ impl TestBuilder {
         self.write_inode_raw(inode_num, mode, size, 0, 0, data_block, block_count);
     }
 
+    #[allow(clippy::too_many_arguments)] // test-fixture builder with 1:1 field mapping
     fn write_inode_raw(
         &mut self,
         inode_num: u64,

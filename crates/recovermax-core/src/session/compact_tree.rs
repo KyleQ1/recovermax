@@ -20,6 +20,12 @@ pub struct CompactTree {
     pub filesystem_count: u16,
 }
 
+impl Default for CompactTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompactTree {
     pub fn new() -> Self {
         Self {
@@ -55,6 +61,11 @@ impl CompactTree {
     }
 
     /// Add a node. Returns the node index.
+    ///
+    /// 14 arguments map 1:1 to CompactNode fields — wrapping them in a
+    /// parameter struct just adds a layer of indirection at every call
+    /// site without hiding any real complexity.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_node(
         &mut self,
         inode: u64,

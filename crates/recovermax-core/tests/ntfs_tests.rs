@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)] // test fixtures favor direct indexing
+
 use recovermax_core::fs::ntfs;
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::Scanner;
