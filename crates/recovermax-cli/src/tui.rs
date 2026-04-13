@@ -3,9 +3,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::{
-    deleted_recovery_hint_message, filesystem_has_tree, list_children_with_fallback,
-    print_traversal_warnings, recover_with_fallback, resolve_node_with_fallback,
-    resolve_recovery_target, search_with_fallback, traversal_warnings, walk_tree_with_fallback,
+    deleted_recovery_hint_message, list_children_with_fallback, print_traversal_warnings,
+    recover_with_fallback, resolve_node_with_fallback, resolve_recovery_target,
+    search_with_fallback, traversal_warnings, walk_tree_with_fallback,
 };
 use anyhow::{anyhow, Context, Result};
 use recovermax_core::fs::EntrySource;
@@ -570,7 +570,7 @@ impl<'a> SessionShell<'a> {
                 println!("Traversal warning: {}", warning);
             }
         }
-        if !filesystem_has_tree(self.session, self.current_fs)
+        if !self.session.has_tree(self.current_fs)
             && self.session.attached_reader().is_some()
         {
             println!("Resolution mode: live-fallback");

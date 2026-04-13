@@ -454,6 +454,55 @@ impl RecoverySession {
         &self.artifact.filesystems
     }
 
+    /// Whether the filesystem at `filesystem_index` has a persisted
+    /// session tree (from a prior scan). When false, callers must fall
+    /// back to live filesystem reads via the attached image reader.
+    pub fn has_tree(&self, filesystem_index: usize) -> bool {
+        self.artifact
+            .filesystem_session(filesystem_index)
+            .map(|filesystem| filesystem.has_tree())
+            .unwrap_or(false)
+    }
+
+    /// Open an ext4 handle on the attached image reader for the filesystem
+    /// at `filesystem_index`. Used by live-fallback paths (search, browse,
+    /// orphan scoring) when the session has no persisted tree.
+    ///
+    /// Fails if the session has no attached reader, if the filesystem
+    /// index is out of range, or if the filesystem isn't ext4.
+    pub fn live_ext4(&self, filesystem_index: usize) -> Result<Ext4Fs<'_>> {
+        let filesystem = self
+            .artifact
+            .filesystem_session(filesystem_index)
+            .with_context(|| format!("filesystem {} not found in session", filesystem_index))?;
+        if filesystem.fs_info.fs_type != "ext4" {
+            bail!(
+                "filesystem {} is {} and does not support live ext4 fallback",
+                filesystem_index,
+                filesystem.fs_info.fs_type,
+            );
+        }
+        let reader = self
+            .reader
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session has no attached image reader"))?;
+        Ext4Fs::new(reader, filesystem.fs_info.offset)
+    }
+
+    /// Raw deleted-inode scan over the filesystem at `filesystem_index`.
+    /// Returns the inode records (inode number, dtime, sizes, etc.) with
+    /// no orphan-tree bookkeeping — higher-level orphan resolution lives
+    /// in the `recover` module.
+    ///
+    /// Fails for the same reasons as `live_ext4`.
+    pub fn deleted_inodes(
+        &self,
+        filesystem_index: usize,
+    ) -> Result<Vec<crate::fs::ext4::DeletedInode>> {
+        let ext4 = self.live_ext4(filesystem_index)?;
+        ext4.scan_deleted_inodes()
+    }
+
     pub fn resolve_node(
         &mut self,
         filesystem_index: usize,

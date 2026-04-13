@@ -1589,7 +1589,7 @@ fn orphan_recovery_candidates(
     session: &RecoverySession,
     node: &SessionNode,
 ) -> Option<Vec<SessionNode>> {
-    if filesystem_has_tree(session, node.filesystem_index) {
+    if session.has_tree(node.filesystem_index) {
         let filesystem = session
             .artifact()
             .filesystem_session(node.filesystem_index)?;
@@ -1608,7 +1608,7 @@ fn orphan_recovery_candidates(
         return Some(candidates);
     }
 
-    let ext4 = live_ext4(session, node.filesystem_index).ok()?;
+    let ext4 = session.live_ext4(node.filesystem_index).ok()?;
     let mut candidates = live_deleted_orphan_nodes(&ext4, node.filesystem_index, None)
         .into_iter()
         .filter(|candidate| candidate.file_type == node.file_type)
@@ -1795,10 +1795,10 @@ fn gather_sibling_context(
     session: &RecoverySession,
     node: &SessionNode,
 ) -> SiblingContext {
-    if filesystem_has_tree(session, node.filesystem_index) {
+    if session.has_tree(node.filesystem_index) {
         return gather_sibling_context_from_session(session, node);
     }
-    if let Ok(ext4) = live_ext4(session, node.filesystem_index) {
+    if let Ok(ext4) = session.live_ext4(node.filesystem_index) {
         return gather_sibling_context_live(&ext4, node.parent_inode);
     }
     SiblingContext {
@@ -2000,7 +2000,7 @@ fn tiebreaker_scored_orphan_candidate(
 
     let siblings = gather_sibling_context(session, node);
 
-    let inodes_per_group = live_ext4(session, node.filesystem_index)
+    let inodes_per_group = session.live_ext4(node.filesystem_index)
         .ok()
         .map(|ext4| ext4.superblock.inodes_per_group);
 
@@ -2057,7 +2057,7 @@ pub(crate) fn resolve_node_with_fallback(
     filesystem_index: usize,
     target: &str,
 ) -> Result<SessionNode> {
-    if filesystem_has_tree(session, filesystem_index) {
+    if session.has_tree(filesystem_index) {
         session.resolve_node(filesystem_index, target)
     } else {
         live_resolve_node(session, filesystem_index, target)
@@ -2069,7 +2069,7 @@ pub(crate) fn list_children_with_fallback(
     filesystem_index: usize,
     path: &str,
 ) -> Result<Vec<SessionNode>> {
-    if filesystem_has_tree(session, filesystem_index) {
+    if session.has_tree(filesystem_index) {
         session.list_children(filesystem_index, path)
     } else {
         live_list_children(session, filesystem_index, path)
@@ -2082,7 +2082,7 @@ pub(crate) fn walk_tree_with_fallback(
     path: &str,
     depth: usize,
 ) -> Result<Vec<SessionTreeEntry>> {
-    if filesystem_has_tree(session, filesystem_index) {
+    if session.has_tree(filesystem_index) {
         session.walk_tree(filesystem_index, path, depth)
     } else {
         live_walk_tree(session, filesystem_index, path, depth)
@@ -2130,32 +2130,9 @@ pub(crate) fn search_with_fallback(
     Ok(matches)
 }
 
-pub(crate) fn filesystem_has_tree(session: &RecoverySession, filesystem_index: usize) -> bool {
-    session
-        .artifact()
-        .filesystem_session(filesystem_index)
-        .map(|filesystem| filesystem.has_tree())
-        .unwrap_or(false)
-}
-
-fn live_ext4(session: &RecoverySession, filesystem_index: usize) -> Result<Ext4Fs<'_>> {
-    let filesystem = session
-        .artifact()
-        .filesystem_session(filesystem_index)
-        .with_context(|| format!("filesystem {} not found in session", filesystem_index))?;
-    if filesystem.fs_info.fs_type != "ext4" {
-        bail!(
-            "filesystem {} is {} and does not support live ext4 fallback",
-            filesystem_index,
-            filesystem.fs_info.fs_type
-        );
-    }
-
-    let reader = session
-        .attached_reader()
-        .ok_or_else(|| anyhow!("session has no attached image reader"))?;
-    Ext4Fs::new(reader, filesystem.fs_info.offset)
-}
+// `filesystem_has_tree` and `live_ext4` moved to RecoverySession methods
+// (RecoverySession::has_tree / ::live_ext4). Callers in this file use the
+// method form directly.
 
 fn live_resolve_node(
     session: &RecoverySession,
@@ -2183,7 +2160,7 @@ fn live_resolve_node(
         }
     }
 
-    let ext4 = live_ext4(session, filesystem_index)?;
+    let ext4 = session.live_ext4(filesystem_index)?;
     let normalized = normalize_session_path(target);
     if normalized == "/" {
         return live_root_node(&ext4, filesystem_index);
@@ -2279,7 +2256,7 @@ fn live_list_children(
     filesystem_index: usize,
     path: &str,
 ) -> Result<Vec<SessionNode>> {
-    let ext4 = live_ext4(session, filesystem_index)?;
+    let ext4 = session.live_ext4(filesystem_index)?;
     let node = live_resolve_node(session, filesystem_index, path)?;
     if node.file_type != FileType::Directory {
         return Ok(Vec::new());
@@ -2328,7 +2305,7 @@ fn live_walk_tree(
     path: &str,
     depth: usize,
 ) -> Result<Vec<SessionTreeEntry>> {
-    let ext4 = live_ext4(session, filesystem_index)?;
+    let ext4 = session.live_ext4(filesystem_index)?;
     let root = live_resolve_node(session, filesystem_index, path)?;
     let mut entries = Vec::new();
     live_walk_tree_recursive(&ext4, filesystem_index, root, 0, depth, &mut entries)?;
