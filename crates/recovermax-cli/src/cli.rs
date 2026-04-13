@@ -1564,13 +1564,17 @@ fn unique_orphan_recovery_candidate(
     session: &RecoverySession,
     node: &SessionNode,
 ) -> Option<SessionNode> {
+    use recovermax_core::recover::orphans::{
+        best_orphan_candidate, content_type_narrowed_candidates, strongly_matched_candidate,
+    };
+
     let mut candidates = orphan_recovery_candidates(session, node)?;
     if candidates.len() == 1 {
         return candidates.pop();
     }
 
     // Stage 1: content-type sniffing (strongest signal — exact match)
-    if let Some(winner) = strongly_matched_orphan_recovery_candidate(session, node, &candidates) {
+    if let Some(winner) = strongly_matched_candidate(session, node, &candidates) {
         return Some(winner);
     }
 
@@ -1582,7 +1586,7 @@ fn unique_orphan_recovery_candidate(
         &candidates
     };
 
-    tiebreaker_scored_orphan_candidate(session, node, pool)
+    best_orphan_candidate(session, node, pool)
 }
 
 fn orphan_recovery_candidates(
@@ -1617,106 +1621,6 @@ fn orphan_recovery_candidates(
     Some(candidates)
 }
 
-fn strongly_matched_orphan_recovery_candidate(
-    session: &RecoverySession,
-    node: &SessionNode,
-    candidates: &[SessionNode],
-) -> Option<SessionNode> {
-    let expected_kind = expected_content_kind_for_path(&node.path)?;
-    let reader = session.attached_reader()?;
-    let filesystem = session
-        .artifact()
-        .filesystem_session(node.filesystem_index)?;
-    if filesystem.fs_info.fs_type != "ext4" {
-        return None;
-    }
-
-    let ext4 = Ext4Fs::new(reader, filesystem.fs_info.offset).ok()?;
-    let mut matching = Vec::new();
-
-    for candidate in candidates {
-        let actual_kind = sniff_candidate_content_kind(&ext4, candidate)?;
-        if actual_kind == expected_kind {
-            matching.push(candidate.clone());
-        } else if actual_kind == CandidateContentKind::Unknown {
-            return None;
-        }
-    }
-
-    if matching.len() == 1 {
-        matching.pop()
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CandidateContentKind {
-    Text,
-    Pdf,
-    Png,
-    Jpeg,
-    Gif,
-    Zip,
-    Unknown,
-}
-
-fn expected_content_kind_for_path(path: &str) -> Option<CandidateContentKind> {
-    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "txt" | "md" | "csv" | "log" | "json" | "xml" | "html" | "htm" | "rs" | "c" | "cpp"
-        | "h" | "toml" | "yaml" | "yml" => Some(CandidateContentKind::Text),
-        "pdf" => Some(CandidateContentKind::Pdf),
-        "png" => Some(CandidateContentKind::Png),
-        "jpg" | "jpeg" => Some(CandidateContentKind::Jpeg),
-        "gif" => Some(CandidateContentKind::Gif),
-        "zip" => Some(CandidateContentKind::Zip),
-        _ => None,
-    }
-}
-
-fn sniff_candidate_content_kind(
-    ext4: &Ext4Fs<'_>,
-    candidate: &SessionNode,
-) -> Option<CandidateContentKind> {
-    let inode_num = candidate.inode?;
-    let inode = ext4.read_inode(inode_num).ok()?;
-    let data = ext4.read_inode_data_bounded(&inode, 512).ok()?;
-    Some(sniff_content_kind(&data))
-}
-
-fn sniff_content_kind(data: &[u8]) -> CandidateContentKind {
-    if data.starts_with(b"%PDF-") {
-        return CandidateContentKind::Pdf;
-    }
-    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return CandidateContentKind::Png;
-    }
-    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return CandidateContentKind::Jpeg;
-    }
-    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
-        return CandidateContentKind::Gif;
-    }
-    if data.starts_with(b"PK\x03\x04") {
-        return CandidateContentKind::Zip;
-    }
-    if data.is_empty() {
-        return CandidateContentKind::Unknown;
-    }
-
-    let sample = &data[..data.len().min(512)];
-    let printable = sample
-        .iter()
-        .filter(|byte| matches!(**byte, b'\n' | b'\r' | b'\t') || !byte.is_ascii_control())
-        .count();
-    let nul_bytes = sample.iter().filter(|byte| **byte == 0).count();
-    if nul_bytes == 0 && printable * 10 >= sample.len() * 9 {
-        CandidateContentKind::Text
-    } else {
-        CandidateContentKind::Unknown
-    }
-}
 
 fn candidate_sort_key(left: &SessionNode, right: &SessionNode) -> std::cmp::Ordering {
     file_type_rank(left.file_type)
@@ -1779,278 +1683,6 @@ fn is_orphan_candidate(node: &SessionNode) -> bool {
     node.source == EntrySource::SyntheticOrphan || node.path.starts_with("/$OrphanFiles/")
 }
 
-// ---------------------------------------------------------------------------
-// Tiebreaker scoring for ambiguous orphan candidate resolution
-// ---------------------------------------------------------------------------
-
-/// Contextual signals gathered from resolved siblings of a residual deleted entry.
-struct SiblingContext {
-    /// Median deleted_unix timestamp among resolved siblings.
-    median_dtime: Option<i64>,
-    /// (min, max) inode range of resolved siblings.
-    inode_range: Option<(u64, u64)>,
-}
-
-fn gather_sibling_context(
-    session: &RecoverySession,
-    node: &SessionNode,
-) -> SiblingContext {
-    if session.has_tree(node.filesystem_index) {
-        return gather_sibling_context_from_session(session, node);
-    }
-    if let Ok(ext4) = session.live_ext4(node.filesystem_index) {
-        return gather_sibling_context_live(&ext4, node.parent_inode);
-    }
-    SiblingContext {
-        median_dtime: None,
-        inode_range: None,
-    }
-}
-
-fn gather_sibling_context_from_session(
-    session: &RecoverySession,
-    node: &SessionNode,
-) -> SiblingContext {
-    let parent_id = match node.parent_id {
-        Some(pid) => pid,
-        None => {
-            return SiblingContext {
-                median_dtime: None,
-                inode_range: None,
-            }
-        }
-    };
-
-    let filesystem = match session
-        .artifact()
-        .filesystem_session(node.filesystem_index)
-    {
-        Some(fs) => fs,
-        None => {
-            return SiblingContext {
-                median_dtime: None,
-                inode_range: None,
-            }
-        }
-    };
-
-    let mut dtimes = Vec::new();
-    let mut inodes = Vec::new();
-
-    for sibling in &filesystem.nodes {
-        if sibling.id == node.id || sibling.parent_id != Some(parent_id) {
-            continue;
-        }
-        if let Some(inode) = sibling.inode {
-            inodes.push(inode);
-        }
-        if let Some(dtime) = sibling
-            .timestamps
-            .as_ref()
-            .and_then(|ts| ts.deleted_unix)
-        {
-            dtimes.push(dtime);
-        }
-    }
-
-    dtimes.sort_unstable();
-    inodes.sort_unstable();
-
-    SiblingContext {
-        median_dtime: if dtimes.is_empty() {
-            None
-        } else {
-            Some(recovermax_core::recover::scoring::median_sorted_i64(&dtimes))
-        },
-        inode_range: if inodes.is_empty() {
-            None
-        } else {
-            Some((*inodes.first().unwrap(), *inodes.last().unwrap()))
-        },
-    }
-}
-
-fn gather_sibling_context_live(
-    ext4: &Ext4Fs<'_>,
-    parent_inode: Option<u64>,
-) -> SiblingContext {
-    let parent_ino = match parent_inode {
-        Some(ino) => ino,
-        None => {
-            return SiblingContext {
-                median_dtime: None,
-                inode_range: None,
-            }
-        }
-    };
-
-    let entries = match ext4.list_directory(parent_ino) {
-        Ok(entries) => entries,
-        Err(_) => {
-            return SiblingContext {
-                median_dtime: None,
-                inode_range: None,
-            }
-        }
-    };
-
-    let mut dtimes = Vec::new();
-    let mut inodes = Vec::new();
-    let mut count = 0usize;
-    const MAX_SIBLINGS: usize = 100;
-
-    for entry in &entries {
-        if entry.name == "." || entry.name == ".." || entry.inode == 0 {
-            continue;
-        }
-        count += 1;
-        if count > MAX_SIBLINGS {
-            break;
-        }
-        inodes.push(entry.inode);
-        if let Ok(inode) = ext4.read_inode(entry.inode) {
-            if inode.dtime != 0 {
-                dtimes.push(inode.dtime as i64);
-            }
-        }
-    }
-
-    dtimes.sort_unstable();
-    inodes.sort_unstable();
-
-    SiblingContext {
-        median_dtime: if dtimes.is_empty() {
-            None
-        } else {
-            Some(recovermax_core::recover::scoring::median_sorted_i64(&dtimes))
-        },
-        inode_range: if inodes.is_empty() {
-            None
-        } else {
-            Some((*inodes.first().unwrap(), *inodes.last().unwrap()))
-        },
-    }
-}
-
-// Pure scoring primitives moved to `recovermax_core::recover::scoring`.
-// Weights, thresholds, and score_* functions are imported where needed.
-
-// --- Content-type narrowing (subset that matched extension) ---
-
-fn content_type_narrowed_candidates(
-    session: &RecoverySession,
-    node: &SessionNode,
-    candidates: &[SessionNode],
-) -> Vec<SessionNode> {
-    let expected_kind = match expected_content_kind_for_path(&node.path) {
-        Some(kind) => kind,
-        None => return Vec::new(),
-    };
-    let reader = match session.attached_reader() {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-    let filesystem = match session
-        .artifact()
-        .filesystem_session(node.filesystem_index)
-    {
-        Some(fs) => fs,
-        None => return Vec::new(),
-    };
-    if filesystem.fs_info.fs_type != "ext4" {
-        return Vec::new();
-    }
-    let ext4 = match Ext4Fs::new(reader, filesystem.fs_info.offset) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut matching = Vec::new();
-    for candidate in candidates {
-        let actual_kind = match sniff_candidate_content_kind(&ext4, candidate) {
-            Some(kind) => kind,
-            None => return Vec::new(),
-        };
-        if actual_kind == CandidateContentKind::Unknown {
-            return Vec::new();
-        }
-        if actual_kind == expected_kind {
-            matching.push(candidate.clone());
-        }
-    }
-    matching
-}
-
-// --- Composite tiebreaker scoring ---
-
-fn tiebreaker_scored_orphan_candidate(
-    session: &RecoverySession,
-    node: &SessionNode,
-    candidates: &[SessionNode],
-) -> Option<SessionNode> {
-    use recovermax_core::recover::scoring::{
-        score_block_group_locality, score_dtime_proximity, score_inode_range_proximity,
-        score_size_reasonableness, MIN_SCORE_GAP, WEIGHT_BLOCK_GROUP, WEIGHT_DTIME,
-        WEIGHT_INODE_RANGE, WEIGHT_SIZE,
-    };
-
-    if candidates.len() < 2 {
-        return candidates.first().cloned();
-    }
-
-    let siblings = gather_sibling_context(session, node);
-
-    let inodes_per_group = session.live_ext4(node.filesystem_index)
-        .ok()
-        .map(|ext4| ext4.superblock.inodes_per_group);
-
-    let extension = Path::new(&node.path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
-
-    let mut scores: Vec<(f64, usize)> = candidates
-        .iter()
-        .enumerate()
-        .map(|(idx, candidate)| {
-            let mut total = 0.0;
-
-            if let Some(median_dt) = siblings.median_dtime {
-                total += WEIGHT_DTIME * score_dtime_proximity(candidate, median_dt);
-            }
-
-            if let (Some(parent_ino), Some(ipg)) = (node.parent_inode, inodes_per_group) {
-                if let Some(candidate_ino) = candidate.inode {
-                    total +=
-                        WEIGHT_BLOCK_GROUP * score_block_group_locality(candidate_ino, parent_ino, ipg);
-                }
-            }
-
-            if let Some(range) = siblings.inode_range {
-                if let Some(candidate_ino) = candidate.inode {
-                    total +=
-                        WEIGHT_INODE_RANGE * score_inode_range_proximity(candidate_ino, range);
-                }
-            }
-
-            total += WEIGHT_SIZE
-                * score_size_reasonableness(candidate, extension.as_deref());
-
-            (total, idx)
-        })
-        .collect();
-
-    scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let best = scores[0].0;
-    let runner_up = scores[1].0;
-
-    if best - runner_up >= MIN_SCORE_GAP {
-        Some(candidates[scores[0].1].clone())
-    } else {
-        None
-    }
-}
 
 pub(crate) fn resolve_node_with_fallback(
     session: &mut RecoverySession,
@@ -3079,6 +2711,7 @@ mod tests {
 
     use recovermax_core::fs::FsInfo;
     use recovermax_core::io::ImageReader;
+    use recovermax_core::recover::orphans::{best_orphan_candidate, gather_sibling_context};
     use recovermax_core::recover::scoring::{
         score_block_group_locality, score_size_reasonableness,
     };
@@ -4909,7 +4542,7 @@ mod tests {
             .clone();
 
         let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
-        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        let winner = best_orphan_candidate(&session, &residual, &candidates);
         assert!(winner.is_some(), "tiebreaker should resolve");
         assert_eq!(winner.unwrap().inode, Some(50));
     }
@@ -4966,7 +4599,7 @@ mod tests {
             .clone();
 
         let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
-        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        let winner = best_orphan_candidate(&session, &residual, &candidates);
         assert!(winner.is_some(), "tiebreaker should resolve");
         assert_eq!(winner.unwrap().inode, Some(95));
     }
@@ -5001,7 +4634,7 @@ mod tests {
             .clone();
 
         let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
-        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        let winner = best_orphan_candidate(&session, &residual, &candidates);
         assert!(winner.is_none(), "should stay ambiguous when signals conflict");
     }
 
@@ -5026,7 +4659,7 @@ mod tests {
             .clone();
 
         let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
-        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        let winner = best_orphan_candidate(&session, &residual, &candidates);
         assert!(winner.is_none(), "should stay ambiguous with no sibling context");
     }
 
@@ -5060,7 +4693,7 @@ mod tests {
             .clone();
 
         let candidates = orphan_recovery_candidates(&session, &residual).unwrap();
-        let winner = tiebreaker_scored_orphan_candidate(&session, &residual, &candidates);
+        let winner = best_orphan_candidate(&session, &residual, &candidates);
         assert!(winner.is_some(), "size should help break tie");
         assert_eq!(winner.unwrap().inode, Some(85));
     }
