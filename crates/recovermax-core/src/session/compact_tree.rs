@@ -136,13 +136,24 @@ impl CompactTree {
     }
 
     /// Compute path for a node by walking parent chain.
+    ///
+    /// Bails out at `MAX_PATH_DEPTH` or on a detected cycle and prefixes the
+    /// returned path with `PATH_TRUNCATED_MARKER` so the caller can tell a
+    /// real path from a short-circuited one.
     pub fn compute_path(&self, node_index: u32) -> String {
+        use crate::session::{MAX_PATH_DEPTH, PATH_TRUNCATED_MARKER};
+
         let mut segments: Vec<String> = Vec::new();
         let mut current = node_index;
-        let mut depth = 0u32;
+        let mut visited = std::collections::HashSet::new();
+        let mut truncated = false;
 
         loop {
-            if depth > 64 || current as usize >= self.nodes.len() {
+            if segments.len() >= MAX_PATH_DEPTH || !visited.insert(current) {
+                truncated = true;
+                break;
+            }
+            if (current as usize) >= self.nodes.len() {
                 break;
             }
             let node = &self.nodes[current as usize];
@@ -152,14 +163,20 @@ impl CompactTree {
             }
             segments.push(basename);
             current = node.parent_index;
-            depth += 1;
         }
 
         segments.reverse();
-        if segments.is_empty() {
-            "/".to_string()
+        let body = if segments.is_empty() {
+            String::new()
         } else {
             format!("/{}", segments.join("/"))
+        };
+        if truncated {
+            format!("/{}{}", PATH_TRUNCATED_MARKER, body)
+        } else if body.is_empty() {
+            "/".to_string()
+        } else {
+            body
         }
     }
 
@@ -398,5 +415,59 @@ mod tests {
         let node = reader.resolve_node(0, "/test.txt").unwrap();
         assert_eq!(node.inode, Some(11));
         assert_eq!(node.size, Some(100));
+    }
+
+    /// Direct self-cycle: a node's parent_index points at itself.
+    /// compute_path must terminate and mark the result truncated.
+    #[test]
+    fn compute_path_survives_self_cycle() {
+        use crate::session::PATH_TRUNCATED_MARKER;
+
+        let mut tree = CompactTree::new();
+        let root = tree.add_node(2, u32::MAX, "/", 0, FileType::Directory, false, EntrySource::Filesystem, 4096, 0, 0, 0, 0, 0);
+        let victim = tree.add_node(99, root, "looper", 0, FileType::Directory, false, EntrySource::Filesystem, 0, 2, 0, 0, 0, 0);
+        // Corrupt the parent link so `looper` points at itself.
+        tree.nodes[victim as usize].parent_index = victim;
+
+        let path = tree.compute_path(victim);
+        assert!(path.contains(PATH_TRUNCATED_MARKER), "expected truncation marker, got {}", path);
+    }
+
+    /// Multi-node cycle: a -> b -> a. compute_path must terminate.
+    #[test]
+    fn compute_path_survives_two_node_cycle() {
+        use crate::session::PATH_TRUNCATED_MARKER;
+
+        let mut tree = CompactTree::new();
+        let root = tree.add_node(2, u32::MAX, "/", 0, FileType::Directory, false, EntrySource::Filesystem, 4096, 0, 0, 0, 0, 0);
+        let a = tree.add_node(10, root, "a", 0, FileType::Directory, false, EntrySource::Filesystem, 0, 2, 0, 0, 0, 0);
+        let b = tree.add_node(11, a, "b", 0, FileType::Directory, false, EntrySource::Filesystem, 0, 10, 0, 0, 0, 0);
+        // Corrupt: a's parent now points at b, so a -> b -> a cycles.
+        tree.nodes[a as usize].parent_index = b;
+
+        let path = tree.compute_path(b);
+        assert!(path.contains(PATH_TRUNCATED_MARKER), "expected truncation marker, got {}", path);
+    }
+
+    /// Absurdly deep linear chain (> MAX_PATH_DEPTH) must terminate.
+    /// Simulates the `pydecimal.py x60` pathology: repeating path segments
+    /// that form a long but acyclic chain.
+    #[test]
+    fn compute_path_survives_deep_chain() {
+        use crate::session::{MAX_PATH_DEPTH, PATH_TRUNCATED_MARKER};
+
+        let mut tree = CompactTree::new();
+        let root = tree.add_node(2, u32::MAX, "/", 0, FileType::Directory, false, EntrySource::Filesystem, 4096, 0, 0, 0, 0, 0);
+        let mut parent = root;
+        // Build a chain deeper than the cap so we *know* we'll hit it.
+        for i in 0..(MAX_PATH_DEPTH + 16) {
+            parent = tree.add_node(
+                1000 + i as u64, parent, "x", 0, FileType::Directory, false,
+                EntrySource::Filesystem, 0, 0, 0, 0, 0, 0,
+            );
+        }
+
+        let path = tree.compute_path(parent);
+        assert!(path.contains(PATH_TRUNCATED_MARKER), "expected truncation marker, got {}", path);
     }
 }

@@ -100,14 +100,22 @@ impl ScnReader {
     }
 
     /// Compute the full path for a node by walking the parent chain.
+    ///
+    /// Bails out at `MAX_PATH_DEPTH` or on a detected cycle and prefixes the
+    /// returned path with `PATH_TRUNCATED_MARKER` so the caller can tell a
+    /// real path from a short-circuited one.
     pub fn compute_path(&self, node_index: u32) -> String {
+        use crate::session::{MAX_PATH_DEPTH, PATH_TRUNCATED_MARKER};
+
         let mut segments: Vec<String> = Vec::new();
         let mut current = node_index;
         let mut visited = std::collections::HashSet::new();
+        let mut truncated = false;
 
         loop {
-            if segments.len() > 64 || !visited.insert(current) {
-                break; // depth limit or cycle detected
+            if segments.len() >= MAX_PATH_DEPTH || !visited.insert(current) {
+                truncated = true;
+                break;
             }
             let node = match self.get_compact_node(current) {
                 Some(n) => n,
@@ -122,10 +130,17 @@ impl ScnReader {
         }
 
         segments.reverse();
-        if segments.is_empty() {
-            "/".to_string()
+        let body = if segments.is_empty() {
+            String::new()
         } else {
             format!("/{}", segments.join("/"))
+        };
+        if truncated {
+            format!("/{}{}", PATH_TRUNCATED_MARKER, body)
+        } else if body.is_empty() {
+            "/".to_string()
+        } else {
+            body
         }
     }
 

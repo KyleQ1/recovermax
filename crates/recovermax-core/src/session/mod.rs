@@ -18,6 +18,23 @@ use crate::search::{path_matches, SearchMatch, SearchOptions};
 const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB for large sessions
 const MAX_TREE_DEPTH: usize = 64;
 
+/// Maximum parent-chain walk depth when reconstructing a node's full path
+/// from its `parent_index` links. Guards against corrupt `.scn` files where
+/// parent pointers form cycles or absurdly deep chains (e.g. reimaged drives
+/// where inode 2 was overwritten and parents resolve to garbage).
+///
+/// When the walk hits this cap (or detects a cycle), the returned path is
+/// prefixed with [`PATH_TRUNCATED_MARKER`] so consumers can distinguish a
+/// real path from a bailed-out one. Real filesystems rarely exceed ~40
+/// levels; 256 is generous but finite.
+pub const MAX_PATH_DEPTH: usize = 256;
+
+/// Leading path segment used to flag a compute_path result that hit the
+/// depth cap or a cycle in the parent chain. Starts with `[` so filesystem
+/// operations keyed on the path fail fast instead of writing to some real
+/// location.
+pub const PATH_TRUNCATED_MARKER: &str = "[TRUNCATED]";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanImageSource {
     pub path: PathBuf,

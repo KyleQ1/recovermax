@@ -473,7 +473,7 @@ mod tests {
         let mut writer = ScnWriter::create(f.path()).unwrap();
 
         let (off1, len1) = writer.intern_basename("hello.txt");
-        let (off2, len2) = writer.intern_basename("world.txt");
+        let (off2, _len2) = writer.intern_basename("world.txt");
         let (off3, len3) = writer.intern_basename("hello.txt"); // duplicate
 
         assert_eq!(off1, off3); // same offset
