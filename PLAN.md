@@ -1,7 +1,7 @@
 # RecoverMax — Master Plan
 
 Cross-cutting roadmap for **recovermax** (AGPL core + CLI), **recovermax-gui** (proprietary
-desktop app), and **recovermax.dev** (marketing site). Last revised 2026-04-14.
+desktop app), and **recovermax.dev** (marketing site). Last revised 2026-04-14 (evening).
 
 For architecture details, see `DESIGN.md`. For GUI stack rules, see
 `~/Workspace/recovermax-gui/CLAUDE.md`.
@@ -83,14 +83,14 @@ against existing code in the repo, Sonnet is fine.
 - **Cancel**: cooperative — flips AtomicBool, core bails at next check-point, GUI shows CANCELLED badge
 - **Deleted-only fast scan**: finds filesystems → enumerates deleted inodes directly (skips tree build). ~30 seconds on TB drives vs 30+ minutes for full scan.
 - **Auto-load session**: after .scn save, auto-calls `load_session` → Files/Deleted tabs populate
-- **Files tab**: filesystem picker dropdown, breadcrumb path, double-click to drill down, Backspace to go up, AG Grid with real data from active session
+- **Files tab**: filesystem picker dropdown, breadcrumb path, double-click to drill down, Backspace to go up, AG Grid with real data from active session, right-click context menu ("Recover to…", "Copy path"), native directory picker, inline recovery progress bar
 - **Deleted tab**: AG Grid with inode#, type, size, dtime/mtime/atime from `RecoverySession::deleted_inodes()`, sorted by dtime descending
+- **Recovery workflow**: select files → right-click → Recover to… → pick dest → per-file progress → green/red status bar. Directories recovered recursively. Partial failures skipped.
 - **macOS Full Disk Access nudge**: detects /dev/disk* permission errors, shows Radix Dialog with OS-specific instructions + "Open System Settings" button via x-apple.systempreferences: URL
 - App-managed state: `AppState { active_scan, active_session, active_session_path }`
-- Tauri commands: `list_images`, `list_block_devices`, `list_mounts`, `image_info`, `detect_partitions`, `list_session_files` (real), `list_session_filesystems`, `list_deleted_inodes`, `start_scan`, `cancel_scan`, `load_session`
+- Tauri commands: `list_images`, `list_block_devices`, `list_mounts`, `image_info`, `detect_partitions`, `list_session_files` (real), `list_session_filesystems`, `list_deleted_inodes`, `start_scan`, `cancel_scan`, `load_session`, `recover_files`
 
 ### Known gaps / things NOT shipped yet
-- ❌ Recovery from the GUI (right-click → Recover…) — this is the #1 blocker for usefulness
 - ❌ NTFS not wired to sessions/search/recovery — ext4 only in the GUI
 - ❌ No file preview pane
 - ❌ No search bar in Files tab
@@ -133,12 +133,8 @@ All tasks done 2026-04-13:
 ### ✅ 3.1. Scan from UI — COMPLETE
 Done 2026-04-13/14. Options dialog, progress panel, block map, cancel, .scn save, auto-load, deleted-only fast mode, macOS FDA nudge.
 
-### ⬜ 3.2. Recovery workflow — **NEXT UP, HIGHEST LEVERAGE**
-- Complexity: **medium** · Model: **Sonnet high**
-- Files: `recovermax-gui/src/tabs/FilesTab.tsx`, new `RecoveryDialog.tsx`, new `recover_files` Tauri command
-- Spec: right-click a file (or multi-select) → "Recover…" → dialog asks for output directory. Calls `recovermax_core::recover` via Tauri command. Progress events per file. AG Grid context menu via Radix.
-- Acceptance: can recover a directory of files from a session, see per-file progress, end with all files on disk
-- **Why this is #1:** without this, the GUI is a viewer, not a recovery tool. Everything else is polish until this ships.
+### ✅ 3.2. Recovery workflow — COMPLETE
+Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…" → native OS directory picker → background recovery with per-file progress events → inline status bar (blue=running, green=done, red=error). Also "Copy path" in context menu. Backend: `recover_files` Tauri command resolves paths in active session, spawns `Recoverer::recover_session_node` / `recover_session_subtree` on blocking thread. Partial failures skipped (logged, count reported). Frontend: Radix ContextMenu on FileGrid, `useRecoveryProgress` hook (10Hz throttled), `RecoveryStatusBar` component.
 
 ### ⬜ 3.3. Forensic hash (streaming with progress)
 - Complexity: **medium** · Model: **Sonnet high**
@@ -167,7 +163,7 @@ Done 2026-04-13/14. Options dialog, progress panel, block map, cancel, .scn save
 - Complexity: **small**
 - Spec: top of Files tab, debounced, glob/exact toggle.
 
-**Priority order:** 3.2 → 3.5 → 3.8 → 3.3 → 3.7 → 3.6 → 3.4
+**Priority order:** 3.5 → 3.8 → 3.3 → 3.7 → 3.6 → 3.4
 
 ---
 
