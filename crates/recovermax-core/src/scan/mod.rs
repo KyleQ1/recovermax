@@ -55,7 +55,7 @@ impl ScanReport {
 }
 
 /// Phases of the scan pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanPhase {
     Standard,
     PeBoundary,
@@ -64,7 +64,12 @@ pub enum ScanPhase {
 }
 
 /// Events emitted during scanning for progress visualization.
-#[derive(Debug, Clone)]
+///
+/// Serde-tagged so JSON consumers (GUI Tauri event bridge, test fixtures)
+/// get a predictable shape: `{"type":"Progress","phase":"Standard",
+/// "offset":12345,"bytes_scanned":67890}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ScanEvent {
     PhaseStarted { phase: ScanPhase, total_bytes: u64 },
     Progress { phase: ScanPhase, offset: u64, bytes_scanned: u64 },
@@ -588,5 +593,56 @@ fn gpt_type_name(guid: &str) -> Option<&'static str> {
         "21686148-6449-6E6F-744E-656564454649" => Some("BIOS boot"),
         "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F" => Some("Linux swap"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lock in the JSON shape that Tauri event consumers will see.
+    /// Changing this silently would break the GUI's scan progress hook.
+    #[test]
+    fn scan_event_serializes_with_type_tag() {
+        let ev = ScanEvent::Progress {
+            phase: ScanPhase::Standard,
+            offset: 12345,
+            bytes_scanned: 67890,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"Progress\""));
+        assert!(json.contains("\"phase\":\"Standard\""));
+        assert!(json.contains("\"offset\":12345"));
+        assert!(json.contains("\"bytes_scanned\":67890"));
+    }
+
+    #[test]
+    fn scan_event_filesystem_found_serializes() {
+        let ev = ScanEvent::FilesystemFound {
+            fs_type: "ext4".into(),
+            label: "root".into(),
+            offset: 1024,
+            size: 4096,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"FilesystemFound\""));
+        assert!(json.contains("\"fs_type\":\"ext4\""));
+    }
+
+    #[test]
+    fn scan_event_round_trips_through_json() {
+        let ev = ScanEvent::PhaseComplete {
+            phase: ScanPhase::DeepScan,
+            filesystems_found: 3,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ScanEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            ScanEvent::PhaseComplete { phase, filesystems_found } => {
+                assert_eq!(phase, ScanPhase::DeepScan);
+                assert_eq!(filesystems_found, 3);
+            }
+            _ => panic!("wrong variant round-tripped"),
+        }
     }
 }
