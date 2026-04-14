@@ -1,4 +1,7 @@
-use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{self, FsInfo, LvmMap, LvmSegment};
@@ -96,6 +99,15 @@ pub struct ScanOptions {
     pub file_type_filter: Vec<String>,
     /// Progress callback — called from scan loops.
     pub on_event: Option<Box<dyn Fn(ScanEvent) + Send>>,
+    /// Cooperative cancellation flag. When another thread flips this to
+    /// `true`, the scan aborts at the next check-point (between phases
+    /// and on every loop iteration in deep/PE scans) with an anyhow
+    /// error whose message contains `scan cancelled`.
+    ///
+    /// `Arc<AtomicBool>` so GUI code can keep its own handle to flip
+    /// after spawning the scan onto a blocking thread. Relaxed ordering
+    /// is fine — we don't need the flag to synchronise any other memory.
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ScanOptions {
@@ -108,9 +120,15 @@ impl Default for ScanOptions {
             fs_type_filter: Vec::new(),
             file_type_filter: Vec::new(),
             on_event: None,
+            cancel_flag: None,
         }
     }
 }
+
+/// Marker string that appears in a cancelled scan's error message.
+/// GUI code pattern-matches on it to distinguish user-initiated cancels
+/// from real scan failures (corrupt disk, permission error, etc.).
+pub const SCAN_CANCELLED_MESSAGE: &str = "scan cancelled";
 
 impl std::fmt::Debug for ScanOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,6 +157,19 @@ impl<'a> Scanner<'a> {
         if let Some(ref cb) = options.on_event {
             cb(event);
         }
+    }
+
+    /// Check the cancel flag and bail with SCAN_CANCELLED_MESSAGE if set.
+    /// Called at phase transitions and once per iteration inside the
+    /// hot scan loops — the atomic load is cheap enough that per-iter
+    /// polling doesn't measurably slow the scan.
+    fn check_cancelled(options: &ScanOptions) -> Result<()> {
+        if let Some(flag) = &options.cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                bail!(SCAN_CANCELLED_MESSAGE);
+            }
+        }
+        Ok(())
     }
 
     /// Detect partition table (MBR or GPT)
@@ -353,6 +384,7 @@ impl<'a> Scanner<'a> {
 
     /// Full scan: detect partitions, then filesystems on each
     pub fn full_scan_with_options(&self, options: &ScanOptions) -> Result<ScanReport> {
+        Self::check_cancelled(options)?;
         let partitions = self.detect_partitions()?;
         let mut filesystems = Vec::new();
 
@@ -363,6 +395,7 @@ impl<'a> Scanner<'a> {
 
         // Check each partition for a known filesystem at its start
         for part in &partitions {
+            Self::check_cancelled(options)?;
             tracing::info!(
                 "Checking partition {} at offset {}...",
                 part.name,
@@ -499,6 +532,7 @@ impl<'a> Scanner<'a> {
         let mut bytes_scanned: u64 = 0;
 
         while offset < end {
+            Self::check_cancelled(options)?;
             if offset != part_offset {
                 if let Some(info) = self.detect_filesystem(offset)? {
                     found.push(info);
@@ -538,6 +572,7 @@ impl<'a> Scanner<'a> {
         let mut bytes_scanned: u64 = 0;
 
         while offset < end {
+            Self::check_cancelled(options)?;
             if let Some(info) = self.detect_filesystem(offset)? {
                 found.push(info);
                 return Ok(found);
@@ -644,5 +679,41 @@ mod tests {
             }
             _ => panic!("wrong variant round-tripped"),
         }
+    }
+
+    /// If the cancel flag is already set when scanning starts, the scan
+    /// bails at its first check-point with a recognisable error.
+    ///
+    /// We build a tiny synthetic image (1 MiB of zeros — no real partition
+    /// table, no real filesystem) just so Scanner::new succeeds. The flag
+    /// is checked before detect_partitions so we never actually read disk
+    /// bytes.
+    #[test]
+    fn scanner_honours_cancel_flag() {
+        use crate::io::ImageReader;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(&vec![0u8; 1024 * 1024]).unwrap();
+
+        let reader = ImageReader::open(tmp.path()).unwrap();
+        let scanner = Scanner::new(&reader);
+
+        let flag = Arc::new(AtomicBool::new(true)); // pre-cancelled
+        let options = ScanOptions {
+            cancel_flag: Some(flag),
+            ..Default::default()
+        };
+
+        let err = scanner
+            .full_scan_with_options(&options)
+            .expect_err("pre-set cancel flag should abort scan");
+        assert!(
+            err.to_string().contains(SCAN_CANCELLED_MESSAGE),
+            "expected '{}' in error, got: {}",
+            SCAN_CANCELLED_MESSAGE,
+            err
+        );
     }
 }
