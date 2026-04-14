@@ -2219,7 +2219,7 @@ fn append_ext4_deleted_orphans(
     }
 }
 
-fn minimal_filesystem_sessions(report: &ScanReport) -> Vec<FilesystemSessionArtifact> {
+pub fn minimal_filesystem_sessions(report: &ScanReport) -> Vec<FilesystemSessionArtifact> {
     report
         .filesystems
         .iter()
