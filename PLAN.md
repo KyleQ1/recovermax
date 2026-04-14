@@ -232,18 +232,18 @@ Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…
 
 | # | Task | Why | Effort |
 |---|---|---|---|
-| 1 | **Run `npm run tauri dev` and test the GUI** | ~700 LOC of untested GUI code from this session. Real bugs surface here, not in typechecks. | 30 min |
-| 2 | **3.2 Recovery workflow** | Without this the GUI is a viewer. This makes it a product. | 2-3 hours |
-| 3 | **3.5 File preview pane** | Users want to see what they're recovering before committing. | 2 hours |
-| 4 | **3.8 Search bar** | "Find my file" is the second most common flow after "recover it." | 1 hour |
-| 5 | **4.1 NTFS session integration** | Doubles the addressable market. Parser exists, just needs wiring. | 3-4 hours |
+| 1 | **Test the GUI** (`npm run tauri dev`) | ~1200 LOC of untested GUI code. Real bugs surface here. | 30 min |
+| 2 | **3.5 File preview pane** | See before you recover. Key differentiator vs CLI. | 2 hours |
+| 3 | **3.8 Search bar** | "Find my file" is the second most common flow. | 1 hour |
+| 4 | **4.1 NTFS session integration** | Doubles the addressable market. Parser exists, needs wiring. | 3-4 hours |
+| 5 | **3.3 Forensic hash** | First forensic feature in the GUI. Template for report gen. | 1-2 hours |
 | 6 | **2.5 Sidebar persistence** | Quality-of-life for repeat users. | 1 hour |
-| 7 | **6.1-6.3 Cross-platform release** | Can't ship without this. Tag v0.2.0 after recovery workflow works. | 2-3 hours |
+| 7 | **6.1-6.3 Cross-platform release** | Can't ship without this. Tag v0.2.0 after. | 2-3 hours |
 | 8 | **7.1 Website content** | People can't buy what they can't find. | Ongoing |
 | 9 | **7.3 License gate** | Required before selling. | 2-3 hours |
 
 **First shippable alpha (v0.2.0):** after #1-3 are done + a test pass on a real TB image.
-**First paid release (v1.0.0):** after #5 + #7 + #9.
+**First paid release (v1.0.0):** after #4 + #7 + #9.
 
 ---
 
