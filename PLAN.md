@@ -1,7 +1,7 @@
 # RecoverMax — Master Plan
 
 Cross-cutting roadmap for **recovermax** (AGPL core + CLI), **recovermax-gui** (proprietary
-desktop app), and **recovermax.dev** (marketing site). Last revised 2026-04-14 (evening).
+desktop app), and **recovermax.dev** (marketing site). Last revised 2026-04-14 (late).
 
 For architecture details, see `DESIGN.md`. For GUI stack rules, see
 `~/Workspace/recovermax-gui/CLAUDE.md`.
@@ -49,6 +49,7 @@ against existing code in the repo, Sonnet is fine.
 - Streaming recovery (>1MB files stream, no OOM)
 - Two-pass inode scan (tables + directory entries) for real filenames
 - Streaming `.scn` session artifact via `ScnWriter`, lazy loading on read
+- Binary `.scn` artifacts now embed source-image metadata; older binaries still open via basename inference fallback
 - Memory budget + `MADV_DONTNEED` eviction every 100K nodes
 - Tiebreaker scoring for orphan inodes (dtime, size, type, entropy)
 - Forensic module: audit log, hash, HTML/PDF report scaffolding
@@ -63,7 +64,7 @@ against existing code in the repo, Sonnet is fine.
 ### Core library public API (extracted from CLI, consumed by GUI)
 - `recover::scoring` — 4 scoring functions + weights + median helper (10 tests)
 - `recover::orphans` — content-type sniffing, sibling context, composite tiebreaker (9 tests)
-- `session::open` — `open_session()`, `browse_session_for_image()`, `open_session_for_image()`, `open_session_from_saved()`, `parse_memory_budget()`, `is_binary_scn()` (6 tests)
+- `session::open` — `open_session()`, `browse_session_for_image()`, `open_session_for_image()`, `open_session_from_saved()`, `parse_memory_budget()`, `is_binary_scn()` (8 tests, including binary `.scn` source-resolution coverage)
 - `forensic::session` — `start_image_audit()`, `ForensicIdentity`, `ImageAudit` (4 tests)
 - `RecoverySession::has_tree()`, `::live_ext4()`, `::deleted_inodes()`
 - `ScanEvent` + `ScanPhase` derive Serialize/Deserialize with `#[serde(tag = "type")]`
@@ -71,24 +72,27 @@ against existing code in the repo, Sonnet is fine.
 - `MAX_PATH_DEPTH=256`, `PATH_TRUNCATED_MARKER` — cycle-safe compute_path
 
 ### Shipped in recovermax-gui (proprietary, Tauri 2 + React 19)
-- Layout shell: menu bar, sidebar (tree), tab bar, status bar
+- Layout shell: menu bar, command bar, 50/50 split sidebar + workspace, tab bar, activity log, status bar
 - AG Grid Community wrapper with Proxmox-style theming
 - Plain CSS design system via `tokens.css`
-- Sidebar: Local Drives (physical + virtual APFS), Mounted Filesystems, user-added images/scans/directories
+- Sidebar: Local Drives (physical + virtual APFS), Mounted Filesystems, user-added images / directories, show-all-disks toggle under Drive
+- Tree visuals: connector lines, +/- expanders, virtual disks nested under parent physical disk where possible
+- Selected-image navigation tree: detected partitions, loaded-session filesystems, expandable directories on the left driving the Files view
 - Native file picker for images / `.scn` / directories
-- Dropdown menus via Radix — File + Help wired
-- **Info tab**: image size, partition table, Scan… button with options dialog
-- **Scan progress UI (R-Studio-style)**: 200-cell block map coloured by FS type (ext4 green, NTFS blue, LVM magenta, file-sig amber), MB/GB/TB byte counts (never inodes), elapsed clock, 30s rolling-window ETA, phase label, filesystem list, cancel with confirmation prompt, dismiss button, .scn save with green confirmation
-- **Scan options dialog**: deep-scan checkbox, deleted-only fast mode checkbox, memory budget, .scn output path with native save picker
+- Dropdown menus via Radix — Drive / Create / Tools / View / Help
+- **Info tab**: image size, partition table, raw-disk help action ("Open Disk Access Settings" on macOS `/dev/disk*`)
+- **Scan progress UI (R-Studio-style)**: 200-cell block map coloured by FS type (ext4 green, NTFS blue, LVM magenta, file-sig amber), MB/GB/TB byte counts (never inodes), elapsed clock, 30s rolling-window ETA, phase label, filesystem list, cancel with confirmation prompt, dismiss button, `.scn` save with green confirmation
+- **Scan options dialog**: deep-scan checkbox, deleted-only fast mode checkbox, memory budget, optional `.scn` output path with native save picker
 - **Cancel**: cooperative — flips AtomicBool, core bails at next check-point, GUI shows CANCELLED badge
 - **Deleted-only fast scan**: finds filesystems → enumerates deleted inodes directly (skips tree build). ~30 seconds on TB drives vs 30+ minutes for full scan.
-- **Auto-load session**: after .scn save, auto-calls `load_session` → Files/Deleted tabs populate
+- **Auto-load session**: full scans without `.scn` keep an in-memory active session; scans with `.scn` save immediately load the saved session into backend state
+- **Open `.scn` workflow**: inspect source image first, confirm on mismatch, select the image rather than the `.scn` artifact, and load legacy/new binary sessions correctly
 - **Files tab**: filesystem picker dropdown, breadcrumb path, double-click to drill down, Backspace to go up, AG Grid with real data from active session, right-click context menu ("Recover to…", "Copy path"), native directory picker, inline recovery progress bar
-- **Deleted tab**: AG Grid with inode#, type, size, dtime/mtime/atime from `RecoverySession::deleted_inodes()`, sorted by dtime descending
+- **Deleted tab**: AG Grid with inode#, type, size, dtime/mtime/atime from `RecoverySession::deleted_inodes()`, sorted by dtime descending, scoped to selected filesystem
 - **Recovery workflow**: select files → right-click → Recover to… → pick dest → per-file progress → green/red status bar. Directories recovered recursively. Partial failures skipped.
-- **macOS Full Disk Access nudge**: detects /dev/disk* permission errors, shows Radix Dialog with OS-specific instructions + "Open System Settings" button via x-apple.systempreferences: URL
+- **macOS Full Disk Access nudge**: detects /dev/disk* permission errors, shows Radix Dialog with OS-specific instructions; Info tab and dialog both open System Settings via backend command
 - App-managed state: `AppState { active_scan, active_session, active_session_path }`
-- Tauri commands: `list_images`, `list_block_devices`, `list_mounts`, `image_info`, `detect_partitions`, `list_session_files` (real), `list_session_filesystems`, `list_deleted_inodes`, `start_scan`, `cancel_scan`, `load_session`, `recover_files`
+- Tauri commands: `list_images`, `list_block_devices`, `list_mounts`, `image_info`, `detect_partitions`, `inspect_session`, `list_session_files` (real), `list_session_filesystems`, `list_deleted_inodes`, `start_scan`, `cancel_scan`, `load_session`, `recover_files`, `open_disk_access_settings`
 
 ### Known gaps / things NOT shipped yet
 - ❌ NTFS not wired to sessions/search/recovery — ext4 only in the GUI
@@ -120,18 +124,20 @@ All tasks done 2026-04-13:
 
 - ✅ 2.1. Session-loading public API (`open_session`, `browse_session_for_image`, etc.)
 - ✅ 2.2. Wire `list_session_files` in GUI (real data, accepts fs_index + path)
-- ✅ 2.3. Files tab navigation (filesystem picker, breadcrumb, drill-down, backspace up) — tree pane not done yet, just grid + breadcrumb
+- ✅ 2.3. Files tab navigation (filesystem picker, breadcrumb, drill-down, backspace up)
 - ✅ 2.4. Deleted tab (real data from `deleted_inodes`, AG Grid, sorted by dtime)
-- ⬜ 2.5. Session persistence in GUI — sidebar state across restarts
+- ✅ 2.5. `.scn` source-image resolution and binary metadata compatibility (new binaries embed source metadata; legacy binaries still reopen via basename inference)
+- ✅ 2.6. Left-side session tree navigation (partitions/filesystems/directories drive Files view)
+- ⬜ 2.7. Session persistence in GUI — sidebar state across restarts
 
-**Remaining:** 2.5 is independent and low priority (nice UX, not blocking anything).
+**Remaining:** sidebar persistence across restarts is independent and low priority (nice UX, not blocking anything).
 
 ---
 
 ## Phase 3 — Core GUI workflows — NEXT PRIORITY
 
 ### ✅ 3.1. Scan from UI — COMPLETE
-Done 2026-04-13/14. Options dialog, progress panel, block map, cancel, .scn save, auto-load, deleted-only fast mode, macOS FDA nudge.
+Done 2026-04-13/14. Options dialog, progress panel, block map, cancel, optional `.scn` save, in-memory session for non-persisted scans, deleted-only fast mode, macOS FDA nudge.
 
 ### ✅ 3.2. Recovery workflow — COMPLETE
 Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…" → native OS directory picker → background recovery with per-file progress events → inline status bar (blue=running, green=done, red=error). Also "Copy path" in context menu. Backend: `recover_files` Tauri command resolves paths in active session, spawns `Recoverer::recover_session_node` / `recover_session_subtree` on blocking thread. Partial failures skipped (logged, count reported). Frontend: Radix ContextMenu on FileGrid, `useRecoveryProgress` hook (10Hz throttled), `RecoveryStatusBar` component.
@@ -151,9 +157,8 @@ Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…
 - Spec: text (syntax-highlighted), images (blob URL), PDFs (pdf.js), everything else hex dump.
 - Acceptance: click a .txt → see content inline.
 
-### ⬜ 3.6. View → Refresh
-- Complexity: **tiny**
-- Acceptance: menu item invalidates queries.
+### ✅ 3.6. View / Drive → Refresh — COMPLETE
+Done 2026-04-14. Refresh invalidates queries for drives, mounts, and session-backed views from the top-level app shell.
 
 ### ⬜ 3.7. Keyboard shortcuts
 - Complexity: **small**
@@ -163,7 +168,7 @@ Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…
 - Complexity: **small**
 - Spec: top of Files tab, debounced, glob/exact toggle.
 
-**Priority order:** 3.5 → 3.8 → 3.3 → 3.7 → 3.6 → 3.4
+**Priority order:** 3.5 → 3.8 → 3.3 → 3.7 → 3.4
 
 ---
 
@@ -265,7 +270,7 @@ Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…
 - **Telemetry**: opt-in crash reports (Sentry?) or none at all? Forensic users will be paranoid; leaning NONE by default, opt-in explicit.
 - **GUI tech stack double-check**: Tauri 2 is committed; if it hits a wall on Windows webview, fallback would be Slint or egui (would be a big rewrite).
 - **E01 support via `libewf` FFI vs pure-Rust reimplementation**: FFI is faster to ship; pure-Rust is safer and keeps Windows simpler.
-- **Files tab tree pane**: Phase 2.3 shipped with breadcrumb + grid drill-down but not the split-pane tree view. TanStack Virtual tree on the left is the plan but not urgent — breadcrumb navigation works and R-Studio itself uses this pattern for simple images.
+- **Files tab tree pane**: a basic left-side session tree is now shipped (partitions/filesystems/directories). Open question is whether to go further into a fuller R-Studio-style evidence browser with file leaves + right-side inspector.
 
 ---
 
