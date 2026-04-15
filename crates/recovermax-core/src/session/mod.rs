@@ -66,25 +66,27 @@ impl RecoverySessionArtifact {
     /// Build a binary .scn file directly, streaming nodes to disk.
     /// Uses ~150 MB RAM regardless of filesystem size.
     pub fn build_binary_scn(
+        image_path: &Path,
         reader: &ImageReader,
         report: &ScanReport,
         output_path: &Path,
         on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
     ) -> Result<()> {
-        build_filesystem_sessions_binary(reader, report, output_path, on_event)
+        build_filesystem_sessions_binary(image_path, reader, report, output_path, on_event)
     }
 
     /// Raw inode table scan — scans disk blocks looking for ext4 inode patterns
     /// without needing a superblock or block group descriptors. For drives where
     /// all superblocks have been overwritten (e.g., Proxmox reimaging).
     pub fn build_raw_scan(
+        image_path: &Path,
         reader: &ImageReader,
         output_path: &Path,
         start_offset: u64,
         end_offset: u64,
         on_event: Option<&dyn Fn(crate::scan::ScanEvent)>,
     ) -> Result<()> {
-        raw_inode_table_scan(reader, output_path, start_offset, end_offset, on_event)
+        raw_inode_table_scan(image_path, reader, output_path, start_offset, end_offset, on_event)
     }
 
     pub fn from_scan_with_callback(
@@ -1042,6 +1044,7 @@ fn build_filesystem_sessions(
 /// Large filesystems (>= 100 GB): stream nodes to .scn via ScnWriter, walking
 /// inode tables sequentially. Uses ~200 MB RAM regardless of filesystem size.
 fn build_filesystem_sessions_binary(
+    image_path: &Path,
     reader: &ImageReader,
     report: &ScanReport,
     output_path: &Path,
@@ -1121,7 +1124,10 @@ fn build_filesystem_sessions_binary(
     }
 
     // Finalize: write string table, indexes, header
-    let metadata = serde_json::to_string(&report)?;
+    let metadata = serde_json::to_string(&RecoverySessionArtifact::from_report(
+        image_path,
+        report.clone(),
+    ))?;
     writer.finalize(&metadata)?;
 
     tracing::info!(
@@ -1461,6 +1467,7 @@ fn is_valid_inode(data: &[u8], fs_total_bytes: u64) -> bool {
 /// Pass 1: Find inode table blocks + read directory entries for filenames.
 /// Pass 2: Write nodes to .scn with names from directory entries.
 fn raw_inode_table_scan(
+    image_path: &Path,
     reader: &ImageReader,
     output_path: &Path,
     start_offset: u64,
@@ -1773,7 +1780,10 @@ fn raw_inode_table_scan(
             root_readable: false,
         }],
     };
-    let metadata = serde_json::to_string(&report)?;
+    let metadata = serde_json::to_string(&RecoverySessionArtifact::from_report(
+        image_path,
+        report.clone(),
+    ))?;
     writer.finalize(&metadata)?;
 
     tracing::info!(

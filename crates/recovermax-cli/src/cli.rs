@@ -998,6 +998,7 @@ fn run_scan(
         };
 
         RecoverySessionArtifact::build_binary_scn(
+            image,
             &reader,
             &report,
             path,
@@ -1103,6 +1104,7 @@ fn run_raw_scan(image: &Path, output: &Path, start: &str, end: Option<&str>) -> 
     };
 
     RecoverySessionArtifact::build_raw_scan(
+        image,
         &reader,
         output,
         start_offset,
