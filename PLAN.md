@@ -1,277 +1,482 @@
-# RecoverMax — Master Plan
+# RecoverMax — Product Plan
 
-Cross-cutting roadmap for **recovermax** (AGPL core + CLI), **recovermax-gui** (proprietary
-desktop app), and **recovermax.dev** (marketing site). Last revised 2026-04-14 (late).
+Cross-cutting roadmap for:
+- **recovermax** — AGPL core library + CLI
+- **recovermax-gui** — proprietary desktop GUI
+- **recovermax.dev** — marketing / docs site
 
-For architecture details, see `DESIGN.md`. For GUI stack rules, see
-`~/Workspace/recovermax-gui/CLAUDE.md`.
+Last revised: **2026-04-15**
+
+For architecture details, see `DESIGN.md`.
 
 ---
 
-## Instructions for Claude
+## Product direction
 
-**Before starting a task from this plan:**
+RecoverMax should feel like a real recovery workstation, not just a scan runner.
 
-1. Read the **Model** badge on the task (and its phase). If the currently active Claude
-   model in this session doesn't match, STOP and ask the user to switch:
-   > "This task is rated **Opus high**. You're on Sonnet high. Want me to continue on
-   > Sonnet, or would you rather switch to Opus for this one? (Sonnet is often fine
-   > — the rating is a suggestion, not a requirement.)"
-2. After completing a task, ask the user whether to switch models for the next one if
-   the tiers differ. Don't silently roll into the next task at the wrong model.
-3. For work not explicitly in this plan (random bug fixes, small UI tweaks, quick
-   questions), default to **Sonnet medium/high**. Only escalate to Opus when the work
-   matches one of the Opus criteria in the "Model guidance" section below.
+The intended model is:
+- pick a **drive** or **image**
+- inspect **drive details** first
+- scan or load a saved session
+- browse **partitions / filesystems / directories**
+- inspect, preview, recover, and report
 
-**Model guidance (rules of thumb):**
+The UI should separate two modes clearly:
+- **resource mode**: drives, mounted devices, disk images
+- **session mode**: partitions, filesystems, directories, deleted entries
 
-| Use | For |
+Top-level drive selection should show drive-oriented information on the right.
+Recovery-oriented tabs should appear only when there is a loaded session for the selected source.
+
+---
+
+## Planning rules
+
+When working from this plan:
+
+1. Prefer shipping user-visible workflow improvements over speculative abstractions.
+2. Preserve current working ext4 flows unless the task explicitly justifies a larger refactor.
+3. Treat correctness-critical parser / forensic work as higher risk than GUI polish.
+4. Keep the GUI aligned with recovery software conventions:
+   - left: hierarchy / navigation
+   - right: details, browser, preview, recovery actions
+5. Do not silently regress raw-disk access flows on macOS while improving the layout.
+
+Model guidance:
+
+| Model | Use for |
 |---|---|
-| **Haiku / Sonnet medium** | Renames, trivial edits, YAML/config changes, lookups, explaining existing code |
-| **Sonnet high** | Default for most feature work. GUI wiring, Tauri commands, CSS, content writing, small refactors, documentation |
-| **Opus high** | Architectural decisions, correctness-critical code (filesystem parsers, forensic output), unfamiliar large refactors, API design, legal/evidentiary code |
-| **Opus max** | Complex algorithm design (RAID reconstruction, novel parsers), debugging hard problems after Opus-high got stuck, single long careful outputs needing to be right first try |
-
-**Rule of thumb for "do I need Opus?":** if you're staring at a long file and thinking
-"I don't fully understand this yet," that's an Opus signal. If you're pattern-matching
-against existing code in the repo, Sonnet is fine.
+| Sonnet medium/high | Most GUI work, wiring, styling, documentation, Tauri commands |
+| Opus high | Filesystem integration, forensic output, parser correctness, major architecture |
+| Opus max | RAID, APFS, novel parsers, especially hard debugging |
 
 ---
 
-## Phase 0 — Current snapshot (as of 2026-04-14)
+## Current state
 
-### Shipped and in main (recovermax core + CLI)
-- ext4 full pipeline: superblock, inodes, extents, direct/indirect/double/triple maps
-- ext4 sparse files, symlinks, deleted-inode scanning, raw scan without superblock
-- NTFS boot sector, MFT entry parsing, data run decoding, file reading *(not yet wired to sessions/search/recovery)*
+### Core / CLI
+
+Shipped and working:
+- ext4 recovery pipeline end-to-end
+- ext4 deleted inode scanning
+- raw inode-table scan without superblock
 - MBR + GPT partition detection
-- File carving: JPEG, PNG, PDF, ZIP, GIF, ELF, gzip, SQLite with smart sizing
-- Streaming recovery (>1MB files stream, no OOM)
-- Two-pass inode scan (tables + directory entries) for real filenames
-- Streaming `.scn` session artifact via `ScnWriter`, lazy loading on read
-- Binary `.scn` artifacts now embed source-image metadata; older binaries still open via basename inference fallback
-- Memory budget + `MADV_DONTNEED` eviction every 100K nodes
-- Tiebreaker scoring for orphan inodes (dtime, size, type, entropy)
-- Forensic module: audit log, hash, HTML/PDF report scaffolding
-- Journal parsing (JBD2) for filename hints
-- Terminal UI: image picker, saved-scan reopen, interactive search
-- One-shot CLI: info, scan, recover, carve, hexdump, deleted, raw-scan, search, ls, tree, stat, warnings, cache, unload, hash, filesystems
-- 327 tests across 19 suites, GitHub Actions CI (Linux + macOS + Windows)
-- Zero build warnings, clippy `-D warnings` gated
-- CLA workflow with SHA-pinned action + sentinel + Dependabot
-- All deps current (nom 8, sha2 0.11, indicatif 0.18, console 0.16, actions v6+)
+- file carving for common formats
+- streaming recovery for large files
+- `.scn` session artifacts with lazy loading
+- binary `.scn` files now embed source-image metadata
+- legacy binary `.scn` files still reopen via basename inference fallback
+- memory-budgeted session loading
+- CLI workflows for info, scan, recover, search, deleted, carve, hexdump, filesystems, hash
+- CI on Linux, macOS, Windows
 
-### Core library public API (extracted from CLI, consumed by GUI)
-- `recover::scoring` — 4 scoring functions + weights + median helper (10 tests)
-- `recover::orphans` — content-type sniffing, sibling context, composite tiebreaker (9 tests)
-- `session::open` — `open_session()`, `browse_session_for_image()`, `open_session_for_image()`, `open_session_from_saved()`, `parse_memory_budget()`, `is_binary_scn()` (8 tests, including binary `.scn` source-resolution coverage)
-- `forensic::session` — `start_image_audit()`, `ForensicIdentity`, `ImageAudit` (4 tests)
-- `RecoverySession::has_tree()`, `::live_ext4()`, `::deleted_inodes()`
-- `ScanEvent` + `ScanPhase` derive Serialize/Deserialize with `#[serde(tag = "type")]`
-- `ScanOptions::cancel_flag: Option<Arc<AtomicBool>>` — cooperative scan cancellation
-- `MAX_PATH_DEPTH=256`, `PATH_TRUNCATED_MARKER` — cycle-safe compute_path
+Partially shipped:
+- NTFS parsing exists, but it is not yet integrated into session browsing, search, deleted flows, or recovery
+- forensic/reporting foundations exist in core, but the GUI does not expose them meaningfully yet
 
-### Shipped in recovermax-gui (proprietary, Tauri 2 + React 19)
-- Layout shell: menu bar, command bar, 50/50 split sidebar + workspace, tab bar, activity log, status bar
-- AG Grid Community wrapper with Proxmox-style theming
-- Plain CSS design system via `tokens.css`
-- Sidebar: Local Drives (physical + virtual APFS), Mounted Filesystems, user-added images / directories, show-all-disks toggle under Drive
-- Tree visuals: connector lines, +/- expanders, virtual disks nested under parent physical disk where possible
-- Selected-image navigation tree: detected partitions, loaded-session filesystems, expandable directories on the left driving the Files view
-- Native file picker for images / `.scn` / directories
-- Dropdown menus via Radix — Drive / Create / Tools / View / Help
-- **Info tab**: image size, partition table, raw-disk help action ("Open Disk Access Settings" on macOS `/dev/disk*`)
-- **Scan progress UI (R-Studio-style)**: 200-cell block map coloured by FS type (ext4 green, NTFS blue, LVM magenta, file-sig amber), MB/GB/TB byte counts (never inodes), elapsed clock, 30s rolling-window ETA, phase label, filesystem list, cancel with confirmation prompt, dismiss button, `.scn` save with green confirmation
-- **Scan options dialog**: deep-scan checkbox, deleted-only fast mode checkbox, memory budget, optional `.scn` output path with native save picker
-- **Cancel**: cooperative — flips AtomicBool, core bails at next check-point, GUI shows CANCELLED badge
-- **Deleted-only fast scan**: finds filesystems → enumerates deleted inodes directly (skips tree build). ~30 seconds on TB drives vs 30+ minutes for full scan.
-- **Auto-load session**: full scans without `.scn` keep an in-memory active session; scans with `.scn` save immediately load the saved session into backend state
-- **Open `.scn` workflow**: inspect source image first, confirm on mismatch, select the image rather than the `.scn` artifact, and load legacy/new binary sessions correctly
-- **Files tab**: filesystem picker dropdown, breadcrumb path, double-click to drill down, Backspace to go up, AG Grid with real data from active session, right-click context menu ("Recover to…", "Copy path"), native directory picker, inline recovery progress bar
-- **Deleted tab**: AG Grid with inode#, type, size, dtime/mtime/atime from `RecoverySession::deleted_inodes()`, sorted by dtime descending, scoped to selected filesystem
-- **Recovery workflow**: select files → right-click → Recover to… → pick dest → per-file progress → green/red status bar. Directories recovered recursively. Partial failures skipped.
-- **macOS Full Disk Access nudge**: detects /dev/disk* permission errors, shows Radix Dialog with OS-specific instructions; Info tab and dialog both open System Settings via backend command
-- App-managed state: `AppState { active_scan, active_session, active_session_path }`
-- Tauri commands: `list_images`, `list_block_devices`, `list_mounts`, `image_info`, `detect_partitions`, `inspect_session`, `list_session_files` (real), `list_session_filesystems`, `list_deleted_inodes`, `start_scan`, `cancel_scan`, `load_session`, `recover_files`, `open_disk_access_settings`
+### GUI
 
-### Known gaps / things NOT shipped yet
-- ❌ NTFS not wired to sessions/search/recovery — ext4 only in the GUI
-- ❌ No file preview pane
-- ❌ No search bar in Files tab
-- ❌ No keyboard shortcuts
-- ❌ No sidebar persistence across restarts
-- ❌ No forensic hash from the GUI
-- ❌ No forensic report generation from the GUI
-- ❌ No cross-platform release binaries (dev mode only)
-- ❌ Website content not built out
-- ❌ No license key gate for paid GUI
-- ❌ Untested on real TB-scale images from the GUI (only CLI tested against reiner/reynolds/robbins)
+Shipped and working:
+- app shell with menu bar, command bar, sidebar, tab strip, activity log, status bar
+- local drives, mounted filesystems, user-opened images, and directories in the sidebar
+- show/hide virtual disks
+- raw-drive access guidance on macOS
+- drive details tab and S.M.A.R.T. tab for drive-like selections
+- image info tab for image-like selections
+- scan dialog with deep scan, deleted-only, memory budget, optional `.scn` save
+- scan progress panel with block map, throughput, ETA, phase, filesystem list, cancel
+- full scan without `.scn` now keeps an in-memory session
+- full scan with `.scn` immediately loads the saved session
+- `.scn` open flow resolves the source image first and confirms mismatches
+- left-side session tree with partitions, filesystems, and directories
+- files tab with breadcrumb navigation and AG Grid listing
+- deleted tab backed by real session data
+- recovery workflow from selected file rows
+- refresh action
+
+Working but still rough:
+- tree alignment / indentation needs polish
+- drive-details presentation is functional but not yet at R-Studio quality
+- session browsing is image/session-aware, but right-pane mode switching still needs refinement and cleanup
+
+Not shipped:
+- preview pane
+- search bar
+- forensic hash UI
+- forensic report generation UI
+- keyboard shortcuts
+- sidebar persistence
+- packaged release builds
+- NTFS session integration
+- website / sales / licensing flows
 
 ---
 
-## Phase 1 — Stabilize the core ✅ COMPLETE
+## Product principles
 
-All tasks done 2026-04-13:
-- ✅ 1.1. Commit DESIGN.md + PLAN.md
-- ✅ 1.2. Depth cap in compute_path (MAX_PATH_DEPTH=256, cycle detection, PATH_TRUNCATED_MARKER, 3 tests)
-- ✅ 1.3. Zero build warnings (535 LOC deleted)
-- ✅ 1.4. Cross-platform CI (Ubuntu + macOS + Windows; caught real Windows path-separator bug)
-- ✅ 1.5. Extract CLI logic into core library (4 new modules, 29 tests, ~960 LOC moved)
+These principles should drive feature decisions:
 
----
+### 1. Drive-first, then recovery
 
-## Phase 2 — Session loading ✅ MOSTLY COMPLETE
+When the user clicks a raw drive, show:
+- drive details
+- S.M.A.R.T. / health
+- scan controls
 
-- ✅ 2.1. Session-loading public API (`open_session`, `browse_session_for_image`, etc.)
-- ✅ 2.2. Wire `list_session_files` in GUI (real data, accepts fs_index + path)
-- ✅ 2.3. Files tab navigation (filesystem picker, breadcrumb, drill-down, backspace up)
-- ✅ 2.4. Deleted tab (real data from `deleted_inodes`, AG Grid, sorted by dtime)
-- ✅ 2.5. `.scn` source-image resolution and binary metadata compatibility (new binaries embed source metadata; legacy binaries still reopen via basename inference)
-- ✅ 2.6. Left-side session tree navigation (partitions/filesystems/directories drive Files view)
-- ⬜ 2.7. Session persistence in GUI — sidebar state across restarts
+Do not default a raw drive directly into a recovery browser unless a session is already loaded for that drive.
 
-**Remaining:** sidebar persistence across restarts is independent and low priority (nice UX, not blocking anything).
+### 2. Sessions are implementation support, not the primary concept
 
----
+`.scn` should remain important, but optional.
 
-## Phase 3 — Core GUI workflows — NEXT PRIORITY
+Default user mental model:
+- open image / choose drive
+- scan
+- browse
 
-### ✅ 3.1. Scan from UI — COMPLETE
-Done 2026-04-13/14. Options dialog, progress panel, block map, cancel, optional `.scn` save, in-memory session for non-persisted scans, deleted-only fast mode, macOS FDA nudge.
+Advanced persistence model:
+- save `.scn`
+- reopen `.scn`
+- reuse expensive scans
 
-### ✅ 3.2. Recovery workflow — COMPLETE
-Done 2026-04-14. Right-click selected files/dirs in Files tab → "Recover to…" → native OS directory picker → background recovery with per-file progress events → inline status bar (blue=running, green=done, red=error). Also "Copy path" in context menu. Backend: `recover_files` Tauri command resolves paths in active session, spawns `Recoverer::recover_session_node` / `recover_session_subtree` on blocking thread. Partial failures skipped (logged, count reported). Frontend: Radix ContextMenu on FileGrid, `useRecoveryProgress` hook (10Hz throttled), `RecoveryStatusBar` component.
+### 3. The left tree is the source of truth for navigation
 
-### ⬜ 3.3. Forensic hash (streaming with progress)
-- Complexity: **medium** · Model: **Sonnet high**
-- Spec: "Hash Image (SHA-256)" button in ForensicTab. Background task, progress events every 100MB.
-- Acceptance: hash a 1.9 TB image with live progress.
+The left pane should eventually feel like:
+- drives / images
+- partitions
+- filesystems
+- directories
+- optionally deleted / evidence / bookmarks
 
-### ⬜ 3.4. Forensic report generation
-- Complexity: **medium** · Model: **Opus high** — legal/evidentiary correctness
-- Spec: NIST SP 800-86 compliant HTML report. Chain of custody fields.
-- Acceptance: report suitable for court/insurance.
+Clicking the tree should deterministically drive the right pane.
 
-### ⬜ 3.5. File preview pane
-- Complexity: **medium** · Model: **Sonnet high**
-- Spec: text (syntax-highlighted), images (blob URL), PDFs (pdf.js), everything else hex dump.
-- Acceptance: click a .txt → see content inline.
+### 4. Forensic features must be explicit
 
-### ✅ 3.6. View / Drive → Refresh — COMPLETE
-Done 2026-04-14. Refresh invalidates queries for drives, mounts, and session-backed views from the top-level app shell.
+Do not auto-run expensive forensic work by default.
 
-### ⬜ 3.7. Keyboard shortcuts
-- Complexity: **small**
-- Spec: Cmd/Ctrl+O, Cmd/Ctrl+F, Cmd/Ctrl+R, etc.
+Examples:
+- hashing should be opt-in
+- report generation should be explicit
+- verification should be user-controlled
 
-### ⬜ 3.8. Search bar
-- Complexity: **small**
-- Spec: top of Files tab, debounced, glob/exact toggle.
+### 5. Keep ext4 strong while building parity
 
-**Priority order:** 3.5 → 3.8 → 3.3 → 3.7 → 3.4
+Do not dilute the existing ext4 experience while chasing more filesystem support.
+NTFS is the next real expansion target because it increases addressable use cases most.
 
 ---
 
-## Phase 4 — Multi-filesystem parity
+## Milestones
 
-### ⬜ 4.1. NTFS session integration
-- Complexity: **medium** · Model: **Opus high**
-- Spec: enumerate MFT → build tree → write .scn. Handle $INDEX_ROOT/$INDEX_ALLOCATION.
-- Acceptance: NTFS image scans + browses in GUI.
+## Milestone A — Stabilize the current GUI model
 
-### ⬜ 4.2. NTFS deleted scanning
-- Complexity: **small** (after 4.1)
-- Spec: MFT entries with flag 0, recoverable data runs.
+Goal:
+- make the current drive/details/session split coherent and pleasant
 
-### ⬜ 4.3. FAT32 parser
-- Complexity: **medium**
-- Spec: BPB, FAT table, 8.3+LFN, deleted (0xE5) scanning.
+### A1. Right-pane mode cleanup
+- Status: **in progress**
+- Make top-level drive clicks always land on `Drive`
+- Make top-level image clicks always land on `Info`
+- Make session-tree clicks always land on `Files`
+- Hide recovery-only tabs unless a session exists for the selected source
+- Acceptance:
+  - user cannot get stuck in irrelevant tabs after changing resource type
+  - switching between drives and images feels deliberate, not accidental
 
-### ⬜ 4.4. XFS parser — **large**
-### ⬜ 4.5. APFS parser — **large**
-### ⬜ 4.6. Deeper ext4 journal replay — **medium**
+### A2. Tree alignment and legibility
+- Status: **next**
+- Normalize columns for:
+  - expander
+  - connector line
+  - icon
+  - label
+  - meta
+- Make parent/child relationships visually unambiguous
+- Acceptance:
+  - partitions, filesystems, and folders line up consistently
+  - virtual disks are obviously children where applicable
 
----
+### A3. Drive details polish
+- Improve the drive-details view so it reads like a real disk inspector
+- Show consistent sections such as:
+  - identity
+  - capacity / sector sizes
+  - bus / protocol
+  - OS object
+  - health summary
+- Acceptance:
+  - selecting `disk0` feels useful before any scan is run
 
-## Phase 5 — Advanced recovery features
-
-### ⬜ 5.1. RAID reconstruction — **large**
-### ⬜ 5.2. LVM support — **medium**
-### ⬜ 5.3. Bad sector handling — **medium**
-### ⬜ 5.4. File validation — **small-medium**
-### ⬜ 5.5. E01/EWF support — **medium**
-
----
-
-## Phase 6 — Cross-platform release
-
-### ⬜ 6.1. Windows build — **medium**
-### ⬜ 6.2. macOS signed + notarized build — **medium**
-### ⬜ 6.3. Linux AppImage + .deb — **small**
-### ⬜ 6.4. Auto-update for GUI — **small**
-### ✅ 6.5. Raw device permission elevation (GUI) — COMPLETE (macOS FDA nudge shipped)
-
----
-
-## Phase 7 — Website, marketing, distribution
-
-### ⬜ 7.1. recovermax.dev content buildout — **medium**
-### ⬜ 7.2. GitHub release automation — **small** (release.yml exists, needs changelog)
-### ⬜ 7.3. GUI license + key gate — **medium**
-### ⬜ 7.4. Community presence — **medium** (ongoing)
-### ✅ 7.5. CLA for core contributions — COMPLETE (in-repo signatures, SHA-pinned action, sentinel workflow, Dependabot)
-
----
-
-## Phase 8 — Long-horizon features
-
-### ⬜ 8.1. FUSE mount — **large**
-### ⬜ 8.2. Remote SSH recovery — **medium**
-### ⬜ 8.3. Python bindings — **medium**
-### ⬜ 8.4. Mobile forensics — **large**
-### ⬜ 8.5. AI-assisted triage — **medium-large**
+### A4. S.M.A.R.T. tab quality pass
+- Better summarize health and capabilities
+- Prefer richer properties when `smartctl` is available
+- Gracefully degrade when it is not
+- Acceptance:
+  - the tab is clearly useful even if full vendor attributes are unavailable
 
 ---
 
-## What to do next (priority order)
+## Milestone B — Recovery browsing quality
 
-| # | Task | Why | Effort |
-|---|---|---|---|
-| 1 | **Test the GUI** (`npm run tauri dev`) | ~1200 LOC of untested GUI code. Real bugs surface here. | 30 min |
-| 2 | **3.5 File preview pane** | See before you recover. Key differentiator vs CLI. | 2 hours |
-| 3 | **3.8 Search bar** | "Find my file" is the second most common flow. | 1 hour |
-| 4 | **4.1 NTFS session integration** | Doubles the addressable market. Parser exists, needs wiring. | 3-4 hours |
-| 5 | **3.3 Forensic hash** | First forensic feature in the GUI. Template for report gen. | 1-2 hours |
-| 6 | **2.5 Sidebar persistence** | Quality-of-life for repeat users. | 1 hour |
-| 7 | **6.1-6.3 Cross-platform release** | Can't ship without this. Tag v0.2.0 after. | 2-3 hours |
-| 8 | **7.1 Website content** | People can't buy what they can't find. | Ongoing |
-| 9 | **7.3 License gate** | Required before selling. | 2-3 hours |
+Goal:
+- make the recovery browser feel complete enough for serious daily use
 
-**First shippable alpha (v0.2.0):** after #1-3 are done + a test pass on a real TB image.
-**First paid release (v1.0.0):** after #4 + #7 + #9.
+### B1. File preview pane
+- Priority: **high**
+- Add a preview/details area for the selected file
+- Initial support:
+  - text
+  - images
+  - PDF
+  - fallback hex/text preview
+- Acceptance:
+  - user can inspect a file before recovering it
+
+### B2. Search
+- Priority: **high**
+- Add a search bar for the active session / filesystem
+- Support:
+  - path/name matching
+  - exact vs glob
+  - deleted/live filters later
+- Acceptance:
+  - common “find one file quickly” flow works without manually drilling the tree
+
+### B3. Files/Deleted synchronization
+- Ensure selected filesystem and path stay coherent across:
+  - left tree
+  - files grid
+  - deleted tab
+- Acceptance:
+  - switching filesystems never shows stale content
+
+### B4. Right-side inspector
+- Add a proper inspector pane for the selected row
+- Candidate fields:
+  - full path
+  - inode
+  - size
+  - timestamps
+  - deleted/live state
+  - source/origin
+- Acceptance:
+  - the main grid no longer has to carry every detail column itself
+
+### B5. Deleted browsing model
+- Decide whether deleted entries remain:
+  - a dedicated tab
+  - a special left-tree node
+  - both
+- Acceptance:
+  - deleted content has a clear home in the navigation model
 
 ---
 
-## Recurring work (no phase, always on)
+## Milestone C — Forensic surface area
 
-- **Testing**: every new feature ships with unit tests. Integration test images grown in `test-images/` (gitignored).
-- **Documentation**: every public API in core gets rustdoc. GUI tabs get inline help via tooltips.
-- **Changelog**: human-readable `CHANGELOG.md` kept in sync with tags.
-- **Performance regression tracking**: a benchmark CI job running on a fixed 1 GB test image, alerts if scan time regresses >10%.
-- **Security**: dependency audit monthly (`cargo audit`, `npm audit`); no blindly-accepted PRs. CLA sentinel monitors bot commits.
-- **Real-world testing**: run each new release against the reynolds/reiner/robbins images before tagging.
+Goal:
+- expose the forensic capability already implied by the product positioning
+
+### C1. Hash image
+- Priority: **high**
+- Add explicit `Hash Image…`
+- Use background progress + cancel
+- Primary output:
+  - SHA-256
+- Secondary compatibility options later:
+  - MD5
+  - SHA-1
+- Acceptance:
+  - hash a large image with visible progress and reusable result
+
+### C2. Forensic report generation
+- Add report export from the GUI
+- Initial contents:
+  - source identity
+  - scan metadata
+  - hashes
+  - partition/filesystem summary
+  - recovered outputs summary
+  - audit trail
+- Acceptance:
+  - useful HTML export generated from a normal GUI workflow
+
+### C3. Action / audit timeline
+- Expand the current activity log into something more evidentiary
+- Track:
+  - resource opened
+  - scan run
+  - session loaded
+  - recovery started/completed
+  - hash generated
+- Acceptance:
+  - user can reconstruct what happened in the session
+
+### C4. Hex / offset inspection
+- Add low-level inspection from selected filesystems/files
+- Acceptance:
+  - user can jump from a selected artifact into raw offset-oriented inspection
 
 ---
 
-## Open questions / decisions still to make
+## Milestone D — Filesystem parity
 
-- **Pricing model**: perpetual license vs annual subscription vs maintenance model. R-Studio uses perpetual+maintenance; Disk Drill uses annual. Leaning perpetual with optional maintenance.
-- **License key distribution**: self-host or Lemon Squeezy / Paddle? Third party saves billing headache.
-- **Telemetry**: opt-in crash reports (Sentry?) or none at all? Forensic users will be paranoid; leaning NONE by default, opt-in explicit.
-- **GUI tech stack double-check**: Tauri 2 is committed; if it hits a wall on Windows webview, fallback would be Slint or egui (would be a big rewrite).
-- **E01 support via `libewf` FFI vs pure-Rust reimplementation**: FFI is faster to ship; pure-Rust is safer and keeps Windows simpler.
-- **Files tab tree pane**: a basic left-side session tree is now shipped (partitions/filesystems/directories). Open question is whether to go further into a fuller R-Studio-style evidence browser with file leaves + right-side inspector.
+Goal:
+- move beyond ext4-only sessions
+
+### D1. NTFS session integration
+- Priority: **very high**
+- Build session trees from NTFS metadata
+- Support browse/search/recover in the same session model used by ext4
+- Acceptance:
+  - NTFS image scans and browses in the GUI
+
+### D2. NTFS deleted support
+- Enumerate deleted NTFS entries in a way compatible with the Deleted view
+- Acceptance:
+  - deleted NTFS content appears in the same user-facing recovery flow
+
+### D3. FAT32
+- Build a practical FAT32 parser and deleted scan path
+
+### D4. APFS
+- Long-term, but especially important for macOS credibility
+
+### D5. XFS and others
+- Lower priority than NTFS / FAT32 / APFS
 
 ---
 
-*This plan is a living document. Revise when reality contradicts it.*
+## Milestone E — Packaging and shipping
+
+Goal:
+- make the app installable and supportable on all target desktop platforms
+
+### E1. macOS release
+- Build signed, notarized `RecoverMax.app`
+- Ship via notarized `.dmg`
+- Ensure Full Disk Access guidance matches the packaged app identity
+- Acceptance:
+  - normal macOS user can install, grant FDA, relaunch, and use raw-disk workflows
+
+### E2. Windows release
+- Ship installer package
+- Clarify admin/raw-disk behavior
+- Acceptance:
+  - image workflows work reliably; raw-disk story is documented even if not perfect yet
+
+### E3. Linux release
+- Ship AppImage first
+- Add `.deb` later if needed
+- Acceptance:
+  - testable install flow exists without source build
+
+### E4. Release automation
+- Add changelog + packaging + artifact publishing workflow
+
+### E5. Update strategy
+- Decide whether to ship auto-update before or after first paid release
+
+---
+
+## Milestone F — Commercial layer
+
+Goal:
+- prepare the GUI for real distribution and sales
+
+### F1. Website / docs
+- Make recovermax.dev clearly explain:
+  - what the product does
+  - supported filesystems
+  - raw-disk permission expectations
+  - `.scn` saved-scan workflow
+
+### F2. Licensing / payments
+- Decide:
+  - perpetual vs subscription
+  - key delivery mechanism
+  - offline-friendly activation story
+
+### F3. Positioning
+- Clarify whether RecoverMax is:
+  - a recovery tool with forensic features
+  - a forensic tool with recovery features
+
+The current product direction suggests:
+- recovery-first
+- forensic-capable
+
+---
+
+## Immediate priorities
+
+This is the recommended execution order from here:
+
+1. **Tree alignment and right-pane mode cleanup**
+   - because current usability still suffers from ambiguity
+
+2. **Drive details / SMART polish**
+   - because top-level resource clicks now matter more
+
+3. **File preview pane**
+   - biggest qualitative jump in actual recovery workflow
+
+4. **Search**
+   - biggest speed improvement for common tasks
+
+5. **Forensic hash**
+   - first real forensic feature users will expect
+
+6. **NTFS session integration**
+   - next major capability expansion
+
+7. **Packaged macOS release**
+   - required to validate the production FDA story properly
+
+---
+
+## Definition of a strong alpha
+
+RecoverMax should qualify as a strong alpha when all of the following are true:
+- packaged macOS build exists
+- ext4 image workflows feel coherent end to end
+- raw-drive details and FDA guidance work in the packaged app
+- preview pane exists
+- search exists
+- hashing exists
+- left tree and right pane behave predictably
+
+---
+
+## Definition of a strong v1
+
+RecoverMax should qualify as a strong v1 when:
+- ext4 and NTFS both work end to end in the GUI
+- packaged releases exist on macOS, Windows, and Linux
+- preview, search, hashing, and reporting are all present
+- the drive/details/session split feels intentional and polished
+- licensing / website / release automation are in place
+
+---
+
+## Open questions
+
+- Should deleted content remain a dedicated tab, a left-tree node, or both?
+- How far should the right pane move toward a three-panel R-Studio-style layout?
+- Should S.M.A.R.T. rely on `smartctl` when available, or should richer OS-native paths be built per platform?
+- Is APFS a pre-v1 requirement for macOS credibility, or can FDA/raw-drive support land first and APFS follow?
+- Should the first commercial packaging target be macOS-only until the raw-drive UX is cleaner?
+
+---
+
+## Ongoing requirements
+
+- every new feature should include tests where practical
+- do not regress existing ext4 workflows
+- keep forensic claims modest unless the feature is genuinely complete
+- keep the plan aligned with the shipped product, not aspirational screenshots
+
+---
+
+This document should be rewritten again if the product model changes materially.
