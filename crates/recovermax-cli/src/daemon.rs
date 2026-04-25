@@ -1,12 +1,16 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as ProcessCommand, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use recovermax_core::io::ImageReader;
+use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
+use recovermax_core::session::{open_session_for_image, RecoverySession, RecoverySessionArtifact};
 use serde_json::{json, Value};
 
 const STATE_FILE: &str = "daemon.json";
@@ -91,6 +95,33 @@ pub fn run(command: DaemonCommand) -> Result<()> {
     }
 }
 
+pub(crate) fn submit_scan(
+    workspace: &Path,
+    image: &Path,
+    output: Option<PathBuf>,
+    deep_scan: bool,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let image = absolute_path(image)?;
+    let output = output
+        .map(|path| absolute_path(&path))
+        .transpose()?
+        .unwrap_or_else(|| workspace.join("scan.scn"));
+    let response = request_with_payload(
+        &workspace,
+        "scan",
+        json!({
+            "image": image,
+            "output": output,
+            "deep_scan": deep_scan,
+        }),
+    )?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
 fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
     if let Ok(response) = request(&workspace, "status") {
@@ -98,6 +129,16 @@ fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
         return Ok(());
     }
 
+    ensure_daemon(&workspace)?;
+    let response = request(&workspace, "status")?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+fn ensure_daemon(workspace: &Path) -> Result<()> {
+    if request(workspace, "status").is_ok() {
+        return Ok(());
+    }
     let state_path = state_path(&workspace);
     if state_path.exists() {
         fs::remove_file(&state_path)
@@ -134,8 +175,7 @@ fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
 
     let deadline = SystemTime::now() + Duration::from_secs(5);
     loop {
-        if let Ok(response) = request(&workspace, "status") {
-            print_response(&response, json_output);
+        if request(workspace, "status").is_ok() {
             return Ok(());
         }
         if SystemTime::now() >= deadline {
@@ -182,31 +222,37 @@ fn run_daemon(workspace: &Path) -> Result<()> {
     let address = listener
         .local_addr()
         .context("failed to read daemon control address")?;
-    let mut state = RuntimeState {
+    let state = Arc::new(Mutex::new(RuntimeState {
         pid: process::id(),
         address: address.to_string(),
         token: new_token(),
         started_unix: unix_now(),
         released: false,
         stopping: false,
-    };
+        next_task_id: 1,
+        tasks: Vec::new(),
+        active_image: None,
+        active_scan: None,
+        active_session: None,
+    }));
 
-    write_state(&workspace, &state)?;
+    write_state(&workspace, &state.lock().expect("daemon state poisoned"))?;
+    let (pid, address) = {
+        let guard = state.lock().expect("daemon state poisoned");
+        (guard.pid, guard.address.clone())
+    };
     append_log(
         &workspace,
-        &format!(
-            "daemon listening pid={} address={}",
-            state.pid, state.address
-        ),
+        &format!("daemon listening pid={} address={}", pid, address),
     )?;
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_client(&workspace, &mut state, stream) {
+                if let Err(error) = handle_client(&workspace, Arc::clone(&state), stream) {
                     append_log(&workspace, &format!("client error: {error:#}"))?;
                 }
-                if state.stopping {
+                if state.lock().expect("daemon state poisoned").stopping {
                     break;
                 }
             }
@@ -215,11 +261,15 @@ fn run_daemon(workspace: &Path) -> Result<()> {
     }
 
     append_log(&workspace, "daemon stopped")?;
-    write_state(&workspace, &state)?;
+    write_state(&workspace, &state.lock().expect("daemon state poisoned"))?;
     Ok(())
 }
 
-fn handle_client(workspace: &Path, state: &mut RuntimeState, stream: TcpStream) -> Result<()> {
+fn handle_client(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    stream: TcpStream,
+) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -229,7 +279,8 @@ fn handle_client(workspace: &Path, state: &mut RuntimeState, stream: TcpStream) 
         .get("token")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing daemon token"))?;
-    if token != state.token {
+    let expected_token = state.lock().expect("daemon state poisoned").token.clone();
+    if token != expected_token {
         write_json(
             stream,
             &error_response("unauthorized", "invalid daemon token"),
@@ -242,18 +293,28 @@ fn handle_client(workspace: &Path, state: &mut RuntimeState, stream: TcpStream) 
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing daemon command"))?;
     let response = match command {
-        "status" => status_response(workspace, state, true),
+        "status" => {
+            let guard = state.lock().expect("daemon state poisoned");
+            status_response(workspace, &guard, true)
+        }
         "release" => {
-            state.released = true;
-            write_state(workspace, state)?;
+            let mut guard = state.lock().expect("daemon state poisoned");
+            guard.released = true;
+            guard.active_session = None;
+            write_state(workspace, &guard)?;
             append_log(workspace, "released daemon-held session memory")?;
-            status_response(workspace, state, true)
+            status_response(workspace, &guard, true)
         }
         "stop" => {
-            state.stopping = true;
-            write_state(workspace, state)?;
+            let mut guard = state.lock().expect("daemon state poisoned");
+            guard.stopping = true;
+            write_state(workspace, &guard)?;
             append_log(workspace, "stop requested")?;
-            status_response(workspace, state, true)
+            status_response(workspace, &guard, true)
+        }
+        "scan" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            start_scan_task(workspace, Arc::clone(&state), payload)?
         }
         other => error_response(
             "unknown_command",
@@ -264,19 +325,259 @@ fn handle_client(workspace: &Path, state: &mut RuntimeState, stream: TcpStream) 
     Ok(())
 }
 
+fn start_scan_task(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    let image = payload
+        .get("image")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("scan request is missing image"))?;
+    let output = payload
+        .get("output")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("scan.scn"));
+    let deep_scan = payload
+        .get("deep_scan")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let task = {
+        let mut guard = state.lock().expect("daemon state poisoned");
+        let task_id = guard.next_task_id;
+        guard.next_task_id += 1;
+        let task = TaskState {
+            id: task_id,
+            kind: "scan".to_string(),
+            status: "queued".to_string(),
+            source: image.clone(),
+            output: output.clone(),
+            phase: "queued".to_string(),
+            progress_bytes: 0,
+            total_bytes: 0,
+            filesystems_found: 0,
+            started_unix: unix_now(),
+            completed_unix: None,
+            error: None,
+        };
+        guard.tasks.push(task.clone());
+        write_state(workspace, &guard)?;
+        task
+    };
+
+    append_log(
+        workspace,
+        &format!(
+            "scan task {} queued image={} output={}",
+            task.id,
+            image.display(),
+            output.display()
+        ),
+    )?;
+
+    let workspace_for_thread = workspace.to_path_buf();
+    let state_for_thread = Arc::clone(&state);
+    let task_id = task.id;
+    std::thread::spawn(move || {
+        if let Err(error) = run_scan_task(
+            &workspace_for_thread,
+            state_for_thread,
+            task_id,
+            image,
+            output,
+            deep_scan,
+        ) {
+            let _ = append_log(
+                &workspace_for_thread,
+                &format!("scan task {task_id} failed: {error:#}"),
+            );
+        }
+    });
+
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "accepted",
+        "workspace": workspace,
+        "task_id": task.id,
+        "task": task_to_json(&task),
+        "next_actions": [
+            "recovermax daemon status --workspace <workspace> --json",
+            "recovermax daemon logs --workspace <workspace> --tail 50"
+        ],
+    }))
+}
+
+fn run_scan_task(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    task_id: u64,
+    image: PathBuf,
+    output: PathBuf,
+    deep_scan: bool,
+) -> Result<()> {
+    update_task(workspace, &state, task_id, |task| {
+        task.status = "running".to_string();
+        task.phase = "opening".to_string();
+    })?;
+    append_log(workspace, &format!("scan task {task_id} started"))?;
+
+    let result = (|| -> Result<()> {
+        let reader = ImageReader::open(&image)?;
+        let image_size = reader.len();
+        update_task(workspace, &state, task_id, |task| {
+            task.total_bytes = image_size;
+            task.phase = "detecting".to_string();
+        })?;
+
+        let event_workspace = workspace.to_path_buf();
+        let event_state = Arc::clone(&state);
+        let scan_callback = move |event: ScanEvent| {
+            let _ = update_task_for_event(&event_workspace, &event_state, task_id, &event);
+        };
+        let options = ScanOptions {
+            deep_scan,
+            on_event: Some(Box::new(scan_callback)),
+            ..Default::default()
+        };
+        let scanner = Scanner::new(&reader);
+        let report = scanner.full_scan_with_options(&options)?;
+        update_task(workspace, &state, task_id, |task| {
+            task.filesystems_found = report.filesystems.len();
+            task.phase = "writing-scan".to_string();
+        })?;
+
+        let tree_workspace = workspace.to_path_buf();
+        let tree_state = Arc::clone(&state);
+        let tree_callback = move |event: ScanEvent| {
+            let _ = update_task_for_event(&tree_workspace, &tree_state, task_id, &event);
+        };
+        RecoverySessionArtifact::build_binary_scn(
+            &image,
+            &reader,
+            &report,
+            &output,
+            Some(&tree_callback),
+        )?;
+
+        let session = open_session_for_image(&image, Some(&output), None, true)?;
+        {
+            let mut guard = state.lock().expect("daemon state poisoned");
+            guard.active_image = Some(image.clone());
+            guard.active_scan = Some(output.clone());
+            guard.active_session = Some(session);
+            guard.released = false;
+            if let Some(task) = guard.tasks.iter_mut().find(|task| task.id == task_id) {
+                task.status = "completed".to_string();
+                task.phase = "complete".to_string();
+                task.progress_bytes = image_size;
+                task.total_bytes = image_size;
+                task.completed_unix = Some(unix_now());
+                task.error = None;
+            }
+            write_state(workspace, &guard)?;
+        }
+        append_log(
+            workspace,
+            &format!("scan task {task_id} completed output={}", output.display()),
+        )?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        update_task(workspace, &state, task_id, |task| {
+            task.status = "failed".to_string();
+            task.phase = "failed".to_string();
+            task.completed_unix = Some(unix_now());
+            task.error = Some(format!("{error:#}"));
+        })?;
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn update_task_for_event(
+    workspace: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+    task_id: u64,
+    event: &ScanEvent,
+) -> Result<()> {
+    update_task(workspace, state, task_id, |task| match event {
+        ScanEvent::PhaseStarted { phase, total_bytes } => {
+            task.phase = format!("{phase:?}");
+            task.total_bytes = *total_bytes;
+        }
+        ScanEvent::Progress {
+            phase,
+            offset,
+            bytes_scanned,
+        } => {
+            task.phase = format!("{phase:?}");
+            task.progress_bytes = offset.saturating_add(*bytes_scanned);
+        }
+        ScanEvent::FilesystemFound { .. } => {
+            task.filesystems_found += 1;
+        }
+        ScanEvent::PhaseComplete {
+            phase,
+            filesystems_found,
+        } => {
+            task.phase = format!("{phase:?}-complete");
+            task.filesystems_found = *filesystems_found;
+        }
+        ScanEvent::TreeBuildStarted { .. } => {
+            task.phase = "tree-building".to_string();
+        }
+        ScanEvent::TreeBuildProgress { bytes_offset, .. } => {
+            task.phase = "tree-building".to_string();
+            task.progress_bytes = *bytes_offset;
+        }
+        ScanEvent::TreeBuildComplete { .. } => {
+            task.phase = "tree-complete".to_string();
+        }
+        ScanEvent::FileTypeFound { .. } => {}
+    })
+}
+
+fn update_task(
+    workspace: &Path,
+    state: &Arc<Mutex<RuntimeState>>,
+    task_id: u64,
+    update: impl FnOnce(&mut TaskState),
+) -> Result<()> {
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let Some(task) = guard.tasks.iter_mut().find(|task| task.id == task_id) else {
+        bail!("task {task_id} not found");
+    };
+    update(task);
+    write_state(workspace, &guard)
+}
+
 fn request(workspace: &Path, command: &str) -> Result<Value> {
+    request_with_payload(workspace, command, Value::Null)
+}
+
+fn request_with_payload(workspace: &Path, command: &str, payload: Value) -> Result<Value> {
     let state = read_state(workspace)?;
-    let mut stream = TcpStream::connect(
-        state
-            .get("address")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("daemon state is missing address"))?,
-    )
-    .context("failed to connect to daemon")?;
+    let address: SocketAddr = state
+        .get("address")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("daemon state is missing address"))?
+        .parse()
+        .context("daemon state has invalid address")?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .context("failed to connect to daemon")?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = json!({
         "version": PROTOCOL_VERSION,
         "command": command,
         "token": state.get("token").and_then(Value::as_str).unwrap_or_default(),
+        "payload": payload,
     });
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;
     stream.flush()?;
@@ -327,6 +628,26 @@ fn print_response(response: &Value, json_output: bool) {
     if let Some(released) = response.get("released").and_then(Value::as_bool) {
         println!("Memory released: {}", released);
     }
+    if let Some(task_id) = response.get("task_id").and_then(Value::as_u64) {
+        println!("Task: {}", task_id);
+    }
+    if let Some(tasks) = response.get("tasks").and_then(Value::as_array) {
+        if !tasks.is_empty() {
+            println!("Tasks:");
+            for task in tasks {
+                let id = task.get("id").and_then(Value::as_u64).unwrap_or_default();
+                let status = task
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let phase = task
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                println!("  #{id} {status} {phase}");
+            }
+        }
+    }
 }
 
 fn status_response(workspace: &Path, state: &RuntimeState, online: bool) -> Value {
@@ -346,8 +667,10 @@ fn status_response(workspace: &Path, state: &RuntimeState, online: bool) -> Valu
         "address": state.address,
         "started_unix": state.started_unix,
         "released": state.released,
-        "has_active_session": false,
-        "tasks": [],
+        "active_image": state.active_image,
+        "active_scan": state.active_scan,
+        "has_active_session": state.active_session.is_some(),
+        "tasks": state.tasks.iter().map(task_to_json).collect::<Vec<_>>(),
         "next_actions": [
             "recovermax scan <image> --workspace <workspace>",
             "recovermax daemon release --workspace <workspace>",
@@ -365,9 +688,11 @@ fn offline_status(workspace: &Path, error: anyhow::Error) -> Value {
         "workspace": workspace,
         "pid": state.get("pid").cloned().unwrap_or(Value::Null),
         "address": state.get("address").cloned().unwrap_or(Value::Null),
+        "active_image": state.get("active_image").cloned().unwrap_or(Value::Null),
+        "active_scan": state.get("active_scan").cloned().unwrap_or(Value::Null),
         "released": state.get("released").cloned().unwrap_or(Value::Bool(true)),
         "has_active_session": false,
-        "tasks": [],
+        "tasks": state.get("tasks").cloned().unwrap_or_else(|| json!([])),
         "message": format!("daemon is offline: {error:#}"),
         "next_actions": [
             "recovermax daemon start --workspace <workspace>",
@@ -396,6 +721,15 @@ fn prepare_workspace(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("failed to create workspace {}", path.display()))?;
     path.canonicalize()
         .with_context(|| format!("failed to canonicalize workspace {}", path.display()))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("failed to resolve current directory")?
+        .join(path))
 }
 
 fn state_path(workspace: &Path) -> PathBuf {
@@ -431,9 +765,37 @@ fn write_state(workspace: &Path, state: &RuntimeState) -> Result<()> {
         "token": state.token,
         "started_unix": state.started_unix,
         "released": state.released,
+        "active_image": state.active_image,
+        "active_scan": state.active_scan,
+        "has_active_session": state.active_session.is_some(),
+        "next_task_id": state.next_task_id,
+        "tasks": state.tasks.iter().map(task_to_json).collect::<Vec<_>>(),
     });
     fs::write(&path, serde_json::to_string_pretty(&value)?)
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn task_to_json(task: &TaskState) -> Value {
+    let percent = if task.total_bytes > 0 {
+        Some((task.progress_bytes as f64 / task.total_bytes as f64 * 100.0).min(100.0))
+    } else {
+        None
+    };
+    json!({
+        "id": task.id,
+        "kind": task.kind,
+        "status": task.status,
+        "source": task.source,
+        "output": task.output,
+        "phase": task.phase,
+        "progress_bytes": task.progress_bytes,
+        "total_bytes": task.total_bytes,
+        "percent": percent,
+        "filesystems_found": task.filesystems_found,
+        "started_unix": task.started_unix,
+        "completed_unix": task.completed_unix,
+        "error": task.error,
+    })
 }
 
 fn append_log(workspace: &Path, message: &str) -> Result<()> {
@@ -468,4 +830,25 @@ struct RuntimeState {
     started_unix: u64,
     released: bool,
     stopping: bool,
+    next_task_id: u64,
+    tasks: Vec<TaskState>,
+    active_image: Option<PathBuf>,
+    active_scan: Option<PathBuf>,
+    active_session: Option<RecoverySession>,
+}
+
+#[derive(Clone)]
+struct TaskState {
+    id: u64,
+    kind: String,
+    status: String,
+    source: PathBuf,
+    output: PathBuf,
+    phase: String,
+    progress_bytes: u64,
+    total_bytes: u64,
+    filesystems_found: usize,
+    started_unix: u64,
+    completed_unix: Option<u64>,
+    error: Option<String>,
 }

@@ -66,7 +66,8 @@ fn print_default_guidance() {
     println!("  recovermax daemon release --workspace case1");
     println!("  recovermax daemon stop --workspace case1");
     println!();
-    println!("Daemon-backed scan routing is planned next.");
+    println!("Daemon-backed scan:");
+    println!("  recovermax scan image.dd --workspace case1");
     println!();
     println!("Current direct modes:");
     println!("  recovermax /path/to/image.img");

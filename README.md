@@ -86,7 +86,7 @@ The binary will be at `target/release/recovermax`.
 
 ### Daemon foundation
 
-RecoverMax is moving toward a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The current daemon milestone manages lifecycle and workspace state; routing `scan`, browse, search, and recover commands through the daemon is the next step.
+RecoverMax is moving toward a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The current daemon milestone manages lifecycle, workspace state, and daemon-backed scans. Routing browse, search, and recover commands through the daemon is the next step.
 
 Start a daemon for a workspace:
 
@@ -117,6 +117,20 @@ Show recent daemon logs:
 ```bash
 recovermax daemon logs --workspace case1 --tail 50
 ```
+
+Start a daemon-backed scan:
+
+```bash
+recovermax scan image.dd --workspace case1
+```
+
+The command submits a background task and returns. Use status to watch progress:
+
+```bash
+recovermax daemon status --workspace case1 --json
+```
+
+When complete, the daemon saves `case1/scan.scn` and keeps the loaded session in memory until `daemon release` or `daemon stop`.
 
 ### Direct modes
 
@@ -152,10 +166,9 @@ recovermax carve <image> -d /dest -t jpg,png,pdf     # raw carve by signature
 recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
 ```
 
-Planned daemon-backed shape:
+Planned daemon-backed browse/recover shape:
 
 ```bash
-recovermax scan image.dd --workspace case1
 recovermax filesystems --workspace case1 --json
 recovermax search File --workspace case1 --json
 recovermax select '#2' --workspace case1

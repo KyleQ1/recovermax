@@ -74,6 +74,18 @@ pub enum Command {
         /// Resume an interrupted scan from an existing .scn file
         #[arg(long)]
         resume: bool,
+
+        /// Workspace directory for daemon-backed scan state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Run scan in the foreground even when --workspace is supplied
+        #[arg(long)]
+        foreground: bool,
+
+        /// Print machine-readable JSON for daemon-backed scan submission
+        #[arg(long)]
+        json: bool,
     },
 
     /// Raw inode table scan — finds ext4 inodes on disk without needing a
@@ -376,7 +388,22 @@ pub fn run(args: Args) -> Result<()> {
             file_types,
             fs_type,
             resume,
-        } => run_scan(&image, output, deep_scan, start, end, file_types, fs_type, resume),
+            workspace,
+            foreground,
+            json,
+        } => {
+            if let Some(workspace) = workspace {
+                if !foreground {
+                    if start.is_some() || end.is_some() || resume {
+                        bail!(
+                            "--workspace daemon scans do not yet support --start, --end, or --resume; use --foreground"
+                        );
+                    }
+                    return crate::daemon::submit_scan(&workspace, &image, output, deep_scan, json);
+                }
+            }
+            run_scan(&image, output, deep_scan, start, end, file_types, fs_type, resume)
+        },
         Command::RawScan {
             image,
             output,
