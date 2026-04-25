@@ -132,7 +132,7 @@ pub enum Command {
     /// List directory entries from a browsable session tree
     Ls {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Path within the filesystem session
         #[arg(default_value = "/")]
@@ -153,6 +153,14 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
     },
 
     /// Print a tree view of a browsable session
@@ -493,7 +501,22 @@ pub fn run(args: Args) -> Result<()> {
             fs,
             long,
             memory_budget,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                let path = if let Some(image_arg) = image.as_ref() {
+                    if path == "/" {
+                        image_arg.to_string_lossy().into_owned()
+                    } else {
+                        path
+                    }
+                } else {
+                    path
+                };
+                return crate::daemon::submit_ls(&workspace, &path, fs, long, json);
+            }
+            let image = image.ok_or_else(|| anyhow!("ls requires <image> unless --workspace is supplied"))?;
             // Fast path: binary .scn → use ScnReader directly (~50 MB vs ~3.4 GB)
             if let Some(ref sf) = scan_file {
                 if is_binary_scn(sf) {

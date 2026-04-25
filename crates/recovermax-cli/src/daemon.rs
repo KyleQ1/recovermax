@@ -8,7 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
-use crate::cli::{recover_with_fallback, resolve_recovery_target};
+use crate::cli::{
+    list_children_with_fallback, recover_with_fallback, resolve_node_with_fallback,
+    resolve_recovery_target,
+};
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions};
@@ -128,6 +131,28 @@ pub(crate) fn submit_filesystems(workspace: &Path, json_output: bool) -> Result<
     let workspace = prepare_workspace(workspace)?;
     ensure_daemon(&workspace)?;
     let response = request(&workspace, "filesystems")?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_ls(
+    workspace: &Path,
+    path: &str,
+    fs: Option<usize>,
+    long: bool,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request_with_payload(
+        &workspace,
+        "ls",
+        json!({
+            "path": path,
+            "filesystem_index": fs,
+            "long": long,
+        }),
+    )?;
     print_response(&response, json_output);
     Ok(())
 }
@@ -396,6 +421,10 @@ fn handle_client(
             start_scan_task(workspace, Arc::clone(&state), payload)?
         }
         "filesystems" => filesystems_response(workspace, Arc::clone(&state))?,
+        "ls" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            ls_response(workspace, Arc::clone(&state), payload)?
+        }
         "search" => {
             let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
             search_response(workspace, Arc::clone(&state), payload)?
@@ -461,6 +490,70 @@ fn filesystems_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Re
         "count": count,
         "next_actions": [
             "recovermax ls / --workspace <workspace> --json",
+            "recovermax search <query> --workspace <workspace> --json"
+        ],
+    }))
+}
+
+fn ls_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    ensure_active_session(workspace, &state)?;
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(normalize_daemon_path)
+        .unwrap_or_else(|| "/".to_string());
+    let fs = payload
+        .get("filesystem_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let long = payload
+        .get("long")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let fs_index = fs.or(guard.active_fs).unwrap_or(0);
+    guard.active_fs = Some(fs_index);
+    let Some(session) = guard.active_session.as_mut() else {
+        return Ok(error_response("no_active_session", "workspace has no active scan session"));
+    };
+    let node = resolve_node_with_fallback(session, fs_index, &path)?;
+    if node.file_type != recovermax_core::fs::FileType::Directory {
+        return Ok(json!({
+            "ok": true,
+            "version": PROTOCOL_VERSION,
+            "state": "online",
+            "workspace": workspace,
+            "filesystem_index": fs_index,
+            "path": path,
+            "node": node_to_json(&node, long),
+            "entries": [],
+            "count": 0,
+        }));
+    }
+
+    let children = list_children_with_fallback(session, fs_index, &path)?;
+    let entries = children
+        .iter()
+        .map(|node| node_to_json(node, long))
+        .collect::<Vec<_>>();
+    let count = entries.len();
+    write_state(workspace, &guard)?;
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "filesystem_index": fs_index,
+        "path": path,
+        "entries": entries,
+        "count": count,
+        "next_actions": [
+            "recovermax ls <path> --workspace <workspace> --json",
             "recovermax search <query> --workspace <workspace> --json"
         ],
     }))
@@ -680,6 +773,26 @@ fn search_match_to_json(index: usize, search_match: &SearchMatch) -> Value {
         "source": format!("{:?}", search_match.source),
         "parent_inode": search_match.parent_inode,
     })
+}
+
+fn node_to_json(node: &recovermax_core::session::SessionNode, long: bool) -> Value {
+    let mut value = json!({
+        "filesystem_index": node.filesystem_index,
+        "path": node.path,
+        "basename": node.basename,
+        "file_type": format!("{:?}", node.file_type),
+        "size": node.size,
+        "deleted": node.deleted,
+        "source": format!("{:?}", node.source),
+    });
+    if long {
+        value["id"] = json!(node.id);
+        value["parent_id"] = json!(node.parent_id);
+        value["inode"] = json!(node.inode);
+        value["parent_inode"] = json!(node.parent_inode);
+        value["timestamps"] = json!(node.timestamps);
+    }
+    value
 }
 
 fn selection_value(workspace: &Path, state: &RuntimeState) -> Value {
@@ -1079,6 +1192,20 @@ fn print_response(response: &Value, json_output: bool) {
                     .unwrap_or_default();
                 let path = item.get("path").and_then(Value::as_str).unwrap_or("");
                 println!("  {selector} fs={fs} {path}");
+            }
+        }
+    }
+    if let Some(entries) = response.get("entries").and_then(Value::as_array) {
+        if !entries.is_empty() {
+            println!("Entries:");
+            for entry in entries {
+                let kind = entry
+                    .get("file_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Other");
+                let size = entry.get("size").and_then(Value::as_u64).unwrap_or_default();
+                let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
+                println!("  {kind} {} {path}", bytesize::ByteSize(size));
             }
         }
     }

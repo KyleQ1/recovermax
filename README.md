@@ -136,6 +136,7 @@ List filesystems from the daemon-held session:
 
 ```bash
 recovermax filesystems --workspace case1 --json
+recovermax ls / --workspace case1 --json
 ```
 
 Search and select results across separate CLI calls:
