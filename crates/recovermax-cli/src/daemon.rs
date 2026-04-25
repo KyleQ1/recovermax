@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
+use recovermax_core::search::{SearchMatch, SearchOptions};
 use recovermax_core::session::{open_session_for_image, RecoverySession, RecoverySessionArtifact};
 use serde_json::{json, Value};
 
@@ -130,6 +131,52 @@ pub(crate) fn submit_filesystems(workspace: &Path, json_output: bool) -> Result<
     Ok(())
 }
 
+pub(crate) fn submit_search(
+    workspace: &Path,
+    query: &str,
+    fs: Option<usize>,
+    ignore_case: bool,
+    exact: bool,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request_with_payload(
+        &workspace,
+        "search",
+        json!({
+            "query": query,
+            "filesystem_index": fs,
+            "ignore_case": ignore_case,
+            "exact": exact,
+        }),
+    )?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_select(workspace: &Path, selector: &str, json_output: bool) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request_with_payload(
+        &workspace,
+        "select",
+        json!({
+            "selector": selector,
+        }),
+    )?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_selection(workspace: &Path, json_output: bool) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request(&workspace, "selection")?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
 fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
     if let Ok(response) = request(&workspace, "status") {
@@ -241,6 +288,9 @@ fn run_daemon(workspace: &Path) -> Result<()> {
         tasks: Vec::new(),
         active_image: None,
         active_scan: None,
+        active_fs: Some(0),
+        last_matches: Vec::new(),
+        selected_targets: Vec::new(),
         active_session: None,
     }));
 
@@ -325,6 +375,15 @@ fn handle_client(
             start_scan_task(workspace, Arc::clone(&state), payload)?
         }
         "filesystems" => filesystems_response(workspace, Arc::clone(&state))?,
+        "search" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            search_response(workspace, Arc::clone(&state), payload)?
+        }
+        "select" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            select_response(workspace, Arc::clone(&state), payload)?
+        }
+        "selection" => selection_response(workspace, Arc::clone(&state))?,
         other => error_response(
             "unknown_command",
             &format!("unknown daemon command: {other}"),
@@ -335,18 +394,7 @@ fn handle_client(
 }
 
 fn filesystems_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Result<Value> {
-    {
-        let mut guard = state.lock().expect("daemon state poisoned");
-        if guard.active_session.is_none() {
-            if let (Some(image), Some(scan)) = (guard.active_image.clone(), guard.active_scan.clone())
-            {
-                let session = open_session_for_image(&image, Some(&scan), None, true)?;
-                guard.active_session = Some(session);
-                guard.released = false;
-                write_state(workspace, &guard)?;
-            }
-        }
-    }
+    ensure_active_session(workspace, &state)?;
 
     let guard = state.lock().expect("daemon state poisoned");
     let Some(session) = guard.active_session.as_ref() else {
@@ -391,6 +439,182 @@ fn filesystems_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Re
             "recovermax search <query> --workspace <workspace> --json"
         ],
     }))
+}
+
+fn search_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    ensure_active_session(workspace, &state)?;
+    let query = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("search request is missing query"))?;
+    let fs = payload
+        .get("filesystem_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let options = SearchOptions {
+        ignore_case: payload
+            .get("ignore_case")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        exact: payload
+            .get("exact")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        filesystem_index: fs,
+        ..Default::default()
+    };
+
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let Some(session) = guard.active_session.as_mut() else {
+        return Ok(error_response("no_active_session", "workspace has no active scan session"));
+    };
+    let matches = session.search(query, &options);
+    guard.last_matches = matches.clone();
+    write_state(workspace, &guard)?;
+    let values = matches
+        .iter()
+        .enumerate()
+        .map(|(index, search_match)| search_match_to_json(index, search_match))
+        .collect::<Vec<_>>();
+    let count = values.len();
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "query": query,
+        "matches": values,
+        "count": count,
+        "next_actions": [
+            "recovermax select '#1' --workspace <workspace> --json",
+            "recovermax selection --workspace <workspace> --json"
+        ],
+    }))
+}
+
+fn select_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    let selector = payload
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("select request is missing selector"))?;
+
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let selected = if let Some(index) = parse_match_selector(selector) {
+        let Some(search_match) = guard.last_matches.get(index) else {
+            return Ok(error_response(
+                "selector_out_of_range",
+                &format!("search result {} is not available", selector),
+            ));
+        };
+        SelectedTarget {
+            filesystem_index: search_match.filesystem_index,
+            path: search_match.path.clone(),
+        }
+    } else {
+        SelectedTarget {
+            filesystem_index: guard.active_fs.unwrap_or(0),
+            path: normalize_daemon_path(selector),
+        }
+    };
+
+    if !guard.selected_targets.contains(&selected) {
+        guard.selected_targets.push(selected);
+    }
+    write_state(workspace, &guard)?;
+    Ok(selection_value(workspace, &guard))
+}
+
+fn selection_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Result<Value> {
+    let guard = state.lock().expect("daemon state poisoned");
+    Ok(selection_value(workspace, &guard))
+}
+
+fn ensure_active_session(workspace: &Path, state: &Arc<Mutex<RuntimeState>>) -> Result<()> {
+    let mut guard = state.lock().expect("daemon state poisoned");
+    if guard.active_session.is_none() {
+        if let (Some(image), Some(scan)) = (guard.active_image.clone(), guard.active_scan.clone()) {
+            let session = open_session_for_image(&image, Some(&scan), None, true)?;
+            guard.active_session = Some(session);
+            guard.released = false;
+            write_state(workspace, &guard)?;
+        }
+    }
+    Ok(())
+}
+
+fn search_match_to_json(index: usize, search_match: &SearchMatch) -> Value {
+    json!({
+        "index": index + 1,
+        "selector": format!("#{}", index + 1),
+        "filesystem_index": search_match.filesystem_index,
+        "filesystem_label": search_match.filesystem_label,
+        "filesystem_offset": search_match.filesystem_offset,
+        "inode": search_match.inode,
+        "path": search_match.path,
+        "file_type": format!("{:?}", search_match.file_type),
+        "deleted": search_match.deleted,
+        "source": format!("{:?}", search_match.source),
+        "parent_inode": search_match.parent_inode,
+    })
+}
+
+fn selection_value(workspace: &Path, state: &RuntimeState) -> Value {
+    let selection = state
+        .selected_targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            json!({
+                "index": index + 1,
+                "filesystem_index": target.filesystem_index,
+                "path": target.path,
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = selection.len();
+    json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "selection": selection,
+        "count": count,
+        "next_actions": [
+            "recovermax recover selected --dest <dir> --workspace <workspace>"
+        ],
+    })
+}
+
+fn parse_match_selector(selector: &str) -> Option<usize> {
+    let number = selector.trim().strip_prefix('#')?;
+    let parsed: usize = number.parse().ok()?;
+    parsed.checked_sub(1)
+}
+
+fn normalize_daemon_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    let mut parts = Vec::new();
+    for part in trimmed.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 fn start_scan_task(
@@ -728,6 +952,34 @@ fn print_response(response: &Value, json_output: bool) {
             }
         }
     }
+    if let Some(matches) = response.get("matches").and_then(Value::as_array) {
+        if !matches.is_empty() {
+            println!("Matches:");
+            for item in matches {
+                let selector = item.get("selector").and_then(Value::as_str).unwrap_or("-");
+                let fs = item
+                    .get("filesystem_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let path = item.get("path").and_then(Value::as_str).unwrap_or("");
+                println!("  {selector} fs={fs} {path}");
+            }
+        }
+    }
+    if let Some(selection) = response.get("selection").and_then(Value::as_array) {
+        if !selection.is_empty() {
+            println!("Selection:");
+            for item in selection {
+                let index = item.get("index").and_then(Value::as_u64).unwrap_or_default();
+                let fs = item
+                    .get("filesystem_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let path = item.get("path").and_then(Value::as_str).unwrap_or("");
+                println!("  [{index}] fs={fs} {path}");
+            }
+        }
+    }
 }
 
 fn status_response(workspace: &Path, state: &RuntimeState, online: bool) -> Value {
@@ -749,8 +1001,17 @@ fn status_response(workspace: &Path, state: &RuntimeState, online: bool) -> Valu
         "released": state.released,
         "active_image": state.active_image,
         "active_scan": state.active_scan,
+        "active_fs": state.active_fs,
         "has_active_session": state.active_session.is_some(),
         "tasks": state.tasks.iter().map(task_to_json).collect::<Vec<_>>(),
+        "last_match_count": state.last_matches.len(),
+        "selection": state.selected_targets.iter().enumerate().map(|(index, target)| {
+            json!({
+                "index": index + 1,
+                "filesystem_index": target.filesystem_index,
+                "path": target.path,
+            })
+        }).collect::<Vec<_>>(),
         "next_actions": [
             "recovermax scan <image> --workspace <workspace>",
             "recovermax daemon release --workspace <workspace>",
@@ -770,9 +1031,12 @@ fn offline_status(workspace: &Path, error: anyhow::Error) -> Value {
         "address": state.get("address").cloned().unwrap_or(Value::Null),
         "active_image": state.get("active_image").cloned().unwrap_or(Value::Null),
         "active_scan": state.get("active_scan").cloned().unwrap_or(Value::Null),
+        "active_fs": state.get("active_fs").cloned().unwrap_or(Value::Null),
         "released": state.get("released").cloned().unwrap_or(Value::Bool(true)),
         "has_active_session": false,
         "tasks": state.get("tasks").cloned().unwrap_or_else(|| json!([])),
+        "last_match_count": state.get("last_match_count").cloned().unwrap_or(Value::Null),
+        "selection": state.get("selection").cloned().unwrap_or_else(|| json!([])),
         "message": format!("daemon is offline: {error:#}"),
         "next_actions": [
             "recovermax daemon start --workspace <workspace>",
@@ -847,9 +1111,18 @@ fn write_state(workspace: &Path, state: &RuntimeState) -> Result<()> {
         "released": state.released,
         "active_image": state.active_image,
         "active_scan": state.active_scan,
+        "active_fs": state.active_fs,
         "has_active_session": state.active_session.is_some(),
         "next_task_id": state.next_task_id,
         "tasks": state.tasks.iter().map(task_to_json).collect::<Vec<_>>(),
+        "last_match_count": state.last_matches.len(),
+        "selection": state.selected_targets.iter().enumerate().map(|(index, target)| {
+            json!({
+                "index": index + 1,
+                "filesystem_index": target.filesystem_index,
+                "path": target.path,
+            })
+        }).collect::<Vec<_>>(),
     });
     fs::write(&path, serde_json::to_string_pretty(&value)?)
         .with_context(|| format!("failed to write {}", path.display()))
@@ -914,6 +1187,9 @@ struct RuntimeState {
     tasks: Vec<TaskState>,
     active_image: Option<PathBuf>,
     active_scan: Option<PathBuf>,
+    active_fs: Option<usize>,
+    last_matches: Vec<SearchMatch>,
+    selected_targets: Vec<SelectedTarget>,
     active_session: Option<RecoverySession>,
 }
 
@@ -931,4 +1207,10 @@ struct TaskState {
     started_unix: u64,
     completed_unix: Option<u64>,
     error: Option<String>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct SelectedTarget {
+    filesystem_index: usize,
+    path: String,
 }

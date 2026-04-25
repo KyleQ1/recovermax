@@ -277,10 +277,10 @@ pub enum Command {
     /// Search browsable session paths
     Search {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Query to search for
-        query: String,
+        query: Option<String>,
 
         /// Load a previous scan/session file instead of re-scanning
         #[arg(short, long)]
@@ -301,6 +301,39 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Select a path or numbered daemon search result
+    Select {
+        /// Path or search selector such as #1
+        selector: String,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show daemon-backed selected recovery targets
+    Selection {
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show cache state for a saved session
@@ -658,7 +691,17 @@ pub fn run(args: Args) -> Result<()> {
             ignore_case,
             exact,
             memory_budget,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                let query = query
+                    .or_else(|| image.map(|path| path.to_string_lossy().into_owned()))
+                    .ok_or_else(|| anyhow!("search requires <query>"))?;
+                return crate::daemon::submit_search(&workspace, &query, fs, ignore_case, exact, json);
+            }
+            let image = image.ok_or_else(|| anyhow!("search requires <image>"))?;
+            let query = query.ok_or_else(|| anyhow!("search requires <query>"))?;
             if let Some(ref sf) = scan_file {
                 if is_binary_scn(sf) {
                     let bs = BinarySession::open(&image, sf)?;
@@ -688,6 +731,14 @@ pub fn run(args: Args) -> Result<()> {
             let matches = search_with_fallback(&mut session, &query, &options)?;
             print_matches(&matches);
             Ok(())
+        }
+        Command::Select {
+            selector,
+            workspace,
+            json,
+        } => crate::daemon::submit_select(&workspace, &selector, json),
+        Command::Selection { workspace, json } => {
+            crate::daemon::submit_selection(&workspace, json)
         }
         Command::Cache {
             scan_file,

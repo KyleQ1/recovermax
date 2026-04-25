@@ -138,6 +138,14 @@ List filesystems from the daemon-held session:
 recovermax filesystems --workspace case1 --json
 ```
 
+Search and select results across separate CLI calls:
+
+```bash
+recovermax search File --workspace case1 --json
+recovermax select '#2' --workspace case1 --json
+recovermax selection --workspace case1 --json
+```
+
 ### Direct modes
 
 Show daemon-first guidance:
@@ -175,8 +183,6 @@ recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
 Planned daemon-backed browse/recover shape:
 
 ```bash
-recovermax search File --workspace case1 --json
-recovermax select '#2' --workspace case1
 recovermax recover selected --dest out --workspace case1
 ```
 
