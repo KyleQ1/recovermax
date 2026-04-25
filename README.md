@@ -132,6 +132,12 @@ recovermax daemon status --workspace case1 --json
 
 When complete, the daemon saves `case1/scan.scn` and keeps the loaded session in memory until `daemon release` or `daemon stop`.
 
+List filesystems from the daemon-held session:
+
+```bash
+recovermax filesystems --workspace case1 --json
+```
+
 ### Direct modes
 
 Show daemon-first guidance:
@@ -169,7 +175,6 @@ recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
 Planned daemon-backed browse/recover shape:
 
 ```bash
-recovermax filesystems --workspace case1 --json
 recovermax search File --workspace case1 --json
 recovermax select '#2' --workspace case1
 recovermax recover selected --dest out --workspace case1

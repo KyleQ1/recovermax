@@ -122,6 +122,14 @@ pub(crate) fn submit_scan(
     Ok(())
 }
 
+pub(crate) fn submit_filesystems(workspace: &Path, json_output: bool) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request(&workspace, "filesystems")?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
 fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
     if let Ok(response) = request(&workspace, "status") {
@@ -316,6 +324,7 @@ fn handle_client(
             let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
             start_scan_task(workspace, Arc::clone(&state), payload)?
         }
+        "filesystems" => filesystems_response(workspace, Arc::clone(&state))?,
         other => error_response(
             "unknown_command",
             &format!("unknown daemon command: {other}"),
@@ -323,6 +332,65 @@ fn handle_client(
     };
     write_json(stream, &response)?;
     Ok(())
+}
+
+fn filesystems_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Result<Value> {
+    {
+        let mut guard = state.lock().expect("daemon state poisoned");
+        if guard.active_session.is_none() {
+            if let (Some(image), Some(scan)) = (guard.active_image.clone(), guard.active_scan.clone())
+            {
+                let session = open_session_for_image(&image, Some(&scan), None, true)?;
+                guard.active_session = Some(session);
+                guard.released = false;
+                write_state(workspace, &guard)?;
+            }
+        }
+    }
+
+    let guard = state.lock().expect("daemon state poisoned");
+    let Some(session) = guard.active_session.as_ref() else {
+        return Ok(error_response(
+            "no_active_session",
+            "workspace has no active scan session; run recovermax scan <image> --workspace <workspace>",
+        ));
+    };
+
+    let filesystems = session
+        .filesystems()
+        .iter()
+        .enumerate()
+        .map(|(index, filesystem)| {
+            json!({
+                "index": index,
+                "filesystem_index": filesystem.filesystem_index,
+                "type": filesystem.fs_info.fs_type,
+                "label": filesystem.fs_info.label,
+                "offset": filesystem.fs_info.offset,
+                "size": filesystem.fs_info.total_size,
+                "has_tree": filesystem.has_tree(),
+                "has_partial_tree": filesystem.has_partial_tree(),
+                "warnings": filesystem.warnings.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = filesystems.len();
+
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "active_image": guard.active_image.clone(),
+        "active_scan": guard.active_scan.clone(),
+        "has_active_session": true,
+        "filesystems": filesystems,
+        "count": count,
+        "next_actions": [
+            "recovermax ls / --workspace <workspace> --json",
+            "recovermax search <query> --workspace <workspace> --json"
+        ],
+    }))
 }
 
 fn start_scan_task(
@@ -645,6 +713,18 @@ fn print_response(response: &Value, json_output: bool) {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 println!("  #{id} {status} {phase}");
+            }
+        }
+    }
+    if let Some(filesystems) = response.get("filesystems").and_then(Value::as_array) {
+        if !filesystems.is_empty() {
+            println!("Filesystems:");
+            for fs in filesystems {
+                let index = fs.get("index").and_then(Value::as_u64).unwrap_or_default();
+                let fs_type = fs.get("type").and_then(Value::as_str).unwrap_or("unknown");
+                let label = fs.get("label").and_then(Value::as_str).unwrap_or("");
+                let size = fs.get("size").and_then(Value::as_u64).unwrap_or_default();
+                println!("  [{index}] {fs_type} \"{label}\" ({})", bytesize::ByteSize(size));
             }
         }
     }

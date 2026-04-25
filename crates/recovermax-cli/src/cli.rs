@@ -110,7 +110,7 @@ pub enum Command {
     /// List filesystems from a session artifact or live scan
     Filesystems {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Load a previous scan/session file instead of re-scanning
         #[arg(short, long)]
@@ -119,6 +119,14 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
     },
 
     /// List directory entries from a browsable session tree
@@ -414,7 +422,13 @@ pub fn run(args: Args) -> Result<()> {
             image,
             scan_file,
             memory_budget,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                return crate::daemon::submit_filesystems(&workspace, json);
+            }
+            let image = image.ok_or_else(|| anyhow!("filesystems requires <image> unless --workspace is supplied"))?;
             if let Some(ref sf) = scan_file {
                 if is_binary_scn(sf) {
                     let bs = BinarySession::open(&image, sf)?;
