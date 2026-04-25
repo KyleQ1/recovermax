@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use crate::cli::{recover_with_fallback, resolve_recovery_target};
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
 use recovermax_core::search::{SearchMatch, SearchOptions};
@@ -173,6 +174,26 @@ pub(crate) fn submit_selection(workspace: &Path, json_output: bool) -> Result<()
     let workspace = prepare_workspace(workspace)?;
     ensure_daemon(&workspace)?;
     let response = request(&workspace, "selection")?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_recover(
+    workspace: &Path,
+    target: &str,
+    dest: &Path,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    ensure_daemon(&workspace)?;
+    let response = request_with_payload(
+        &workspace,
+        "recover",
+        json!({
+            "target": target,
+            "dest": absolute_path(dest)?,
+        }),
+    )?;
     print_response(&response, json_output);
     Ok(())
 }
@@ -384,6 +405,10 @@ fn handle_client(
             select_response(workspace, Arc::clone(&state), payload)?
         }
         "selection" => selection_response(workspace, Arc::clone(&state))?,
+        "recover" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            recover_response(workspace, Arc::clone(&state), payload)?
+        }
         other => error_response(
             "unknown_command",
             &format!("unknown daemon command: {other}"),
@@ -535,6 +560,97 @@ fn select_response(
 fn selection_response(workspace: &Path, state: Arc<Mutex<RuntimeState>>) -> Result<Value> {
     let guard = state.lock().expect("daemon state poisoned");
     Ok(selection_value(workspace, &guard))
+}
+
+fn recover_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    ensure_active_session(workspace, &state)?;
+    let target = payload
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or("selected");
+    let dest = payload
+        .get("dest")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("recover request is missing dest"))?;
+
+    let target_refs = {
+        let guard = state.lock().expect("daemon state poisoned");
+        match target {
+            "selected" => {
+                if guard.selected_targets.is_empty() {
+                    return Ok(error_response(
+                        "empty_selection",
+                        "no selected targets; run recovermax select <path|#n> --workspace <workspace>",
+                    ));
+                }
+                guard.selected_targets.clone()
+            }
+            selector => {
+                if let Some(index) = parse_match_selector(selector) {
+                    let Some(search_match) = guard.last_matches.get(index) else {
+                        return Ok(error_response(
+                            "selector_out_of_range",
+                            &format!("search result {selector} is not available"),
+                        ));
+                    };
+                    vec![SelectedTarget {
+                        filesystem_index: search_match.filesystem_index,
+                        path: search_match.path.clone(),
+                    }]
+                } else {
+                    vec![SelectedTarget {
+                        filesystem_index: guard.active_fs.unwrap_or(0),
+                        path: normalize_daemon_path(selector),
+                    }]
+                }
+            }
+        }
+    };
+
+    let mut recovered = Vec::new();
+    {
+        let mut guard = state.lock().expect("daemon state poisoned");
+        let Some(session) = guard.active_session.as_mut() else {
+            return Ok(error_response("no_active_session", "workspace has no active scan session"));
+        };
+        for target_ref in target_refs {
+            let node = resolve_recovery_target(
+                session,
+                Some(target_ref.filesystem_index),
+                &target_ref.path,
+            )?;
+            recover_with_fallback(session, &dest, Some(&node), Some(&target_ref.path))?;
+            recovered.push(json!({
+                "filesystem_index": target_ref.filesystem_index,
+                "path": target_ref.path,
+                "dest": dest,
+            }));
+        }
+    }
+
+    append_log(
+        workspace,
+        &format!(
+            "recovered {} target(s) to {}",
+            recovered.len(),
+            dest.display()
+        ),
+    )?;
+    let count = recovered.len();
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "dest": dest,
+        "recovered": recovered,
+        "count": count,
+    }))
 }
 
 fn ensure_active_session(workspace: &Path, state: &Arc<Mutex<RuntimeState>>) -> Result<()> {
@@ -977,6 +1093,20 @@ fn print_response(response: &Value, json_output: bool) {
                     .unwrap_or_default();
                 let path = item.get("path").and_then(Value::as_str).unwrap_or("");
                 println!("  [{index}] fs={fs} {path}");
+            }
+        }
+    }
+    if let Some(recovered) = response.get("recovered").and_then(Value::as_array) {
+        if !recovered.is_empty() {
+            println!("Recovered:");
+            for item in recovered {
+                let fs = item
+                    .get("filesystem_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let path = item.get("path").and_then(Value::as_str).unwrap_or("");
+                let dest = item.get("dest").and_then(Value::as_str).unwrap_or("");
+                println!("  fs={fs} {path} -> {dest}");
             }
         }
     }

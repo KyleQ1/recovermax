@@ -227,7 +227,7 @@ pub enum Command {
     /// Recover files from a disk image
     Recover {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Destination directory for recovered files
         #[arg(short, long)]
@@ -272,6 +272,14 @@ pub enum Command {
         /// Generate HTML forensic report after recovery
         #[arg(long)]
         report: Option<PathBuf>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search browsable session paths
@@ -603,7 +611,18 @@ pub fn run(args: Args) -> Result<()> {
             evidence_id,
             hash_image,
             report,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                let target = path
+                    .clone()
+                    .or_else(|| image.as_ref().map(|path| path.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "selected".to_string());
+                return crate::daemon::submit_recover(&workspace, &target, &dest, json);
+            }
+            let image = image
+                .ok_or_else(|| anyhow!("recover requires <image> unless --workspace is supplied"))?;
             let forensic_mode = audit_log.is_some() || report.is_some() || hash_image;
 
             if hash_image {

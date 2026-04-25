@@ -146,6 +146,12 @@ recovermax select '#2' --workspace case1 --json
 recovermax selection --workspace case1 --json
 ```
 
+Recover selected targets without restating the image or `.scn`:
+
+```bash
+recovermax recover selected --dest out --workspace case1 --json
+```
+
 ### Direct modes
 
 Show daemon-first guidance:
@@ -178,12 +184,6 @@ recovermax recover <image> -d /dest -p /home/user    # recover a path
 recovermax recover <image> -d /dest -s scan.scn      # recover using saved scan
 recovermax carve <image> -d /dest -t jpg,png,pdf     # raw carve by signature
 recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
-```
-
-Planned daemon-backed browse/recover shape:
-
-```bash
-recovermax recover selected --dest out --workspace case1
 ```
 
 ## Building from Source
