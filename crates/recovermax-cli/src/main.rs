@@ -13,11 +13,11 @@ use tracing_subscriber::EnvFilter;
     version,
     about = "High-performance data recovery tool",
     long_about = "High-performance data recovery tool.\n\n\
-        Run with no arguments to open the terminal UI image picker:\n  \
+        Run with no arguments to open the interactive image picker:\n  \
         recovermax\n\n\
-        Open a specific image directly in the terminal UI:\n  \
+        Open a specific image directly in the stateful interpreter:\n  \
         recovermax /path/to/image.img\n\n\
-        Or use subcommands for scripted/one-shot mode:\n  \
+        Or use subcommands for scripted one-shot mode:\n  \
         recovermax scan /path/to/image.img -o scan.scn"
 )]
 struct TopLevel {

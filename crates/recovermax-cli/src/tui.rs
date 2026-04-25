@@ -164,6 +164,15 @@ struct SessionShell<'a> {
     session: &'a mut RecoverySession,
     current_fs: usize,
     current_path: String,
+    json_output: bool,
+    last_matches: Vec<SearchMatch>,
+    selected_targets: Vec<SelectedTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectedTarget {
+    filesystem_index: usize,
+    path: String,
 }
 
 impl<'a> SessionShell<'a> {
@@ -174,6 +183,9 @@ impl<'a> SessionShell<'a> {
             session,
             current_fs,
             current_path: "/".to_string(),
+            json_output: false,
+            last_matches: Vec::new(),
+            selected_targets: Vec::new(),
         }
     }
 
@@ -183,10 +195,7 @@ impl<'a> SessionShell<'a> {
 
         let stdin = io::stdin();
         loop {
-            print!(
-                "recovermax:tui[fs {} {}]> ",
-                self.current_fs, self.current_path
-            );
+            print!("recovermax[fs {} {}]> ", self.current_fs, self.current_path);
             io::stdout().flush()?;
 
             let mut line = String::new();
@@ -204,6 +213,8 @@ impl<'a> SessionShell<'a> {
                 "quit" | "exit" => break,
                 "back" => break,
                 "help" => self.print_help(),
+                "status" => self.command_status()?,
+                "json" => self.command_json(&parts),
                 "filesystems" | "fs" => self.print_filesystems(),
                 "usefs" => self.command_usefs(&parts)?,
                 "pwd" => println!("{}", self.current_path),
@@ -214,10 +225,13 @@ impl<'a> SessionShell<'a> {
                 "warnings" => self.command_warnings(line)?,
                 "search" => self.command_search(line, None)?,
                 "searchfs" => self.command_searchfs(line)?,
+                "select" => self.command_select(line)?,
+                "selection" => self.command_selection()?,
+                "clear-selection" | "clearselection" => self.command_clear_selection()?,
                 "recover" => self.command_recover(line)?,
                 "cache" => self.command_cache(),
                 "unload" => self.command_unload(),
-                "save" => self.command_save(&parts)?,
+                "save" | "save-scan" => self.command_save(&parts)?,
                 other => {
                     println!("Unknown command: {}", other);
                     self.print_help();
@@ -229,13 +243,15 @@ impl<'a> SessionShell<'a> {
     }
 
     fn print_header(&self) {
-        println!("RecoverMax TUI");
+        println!("RecoverMax interpreter");
         println!("Image: {}", self.image_path.display());
         println!();
     }
 
     fn print_help(&self) {
-        println!("Commands:");
+        println!("Interpreter commands:");
+        println!("  status                 Show current image, filesystem, path, and selection");
+        println!("  json on|off            Toggle JSON output for LLM/tool consumers");
         println!("  filesystems            List discovered filesystems");
         println!("  usefs <index>          Switch active filesystem");
         println!("  pwd                    Print active path");
@@ -244,15 +260,71 @@ impl<'a> SessionShell<'a> {
         println!("  tree [path] [depth]    Print a browsable tree");
         println!("  stat <path|inode>      Show node metadata");
         println!("  warnings [path]        Show traversal warnings");
-        println!("  search <query>         Search the session tree");
-        println!("  searchfs <idx> <q>     Search one filesystem");
-        println!("  recover <dest> [path]  Recover current path or a specific target");
+        println!("  search <query>         Search the session tree and remember numbered results");
+        println!("  searchfs <idx> <q>     Search one filesystem and remember numbered results");
+        println!("  select <path|#n>       Select a path or numbered search result");
+        println!("  selection              Show selected recovery targets");
+        println!("  clear-selection        Clear selected recovery targets");
+        println!("  recover <dest> [target] Recover current path, path, #n, or selected");
         println!("  cache                  Show runtime cache summary");
         println!("  unload                 Evict RecoverMax-managed caches");
         println!("  save <path.scn>        Save current session artifact");
+        println!("  save-scan <path.scn>   Alias for save");
         println!("  back                   Return to image picker");
         println!("  quit                   Exit");
         println!();
+    }
+
+    fn command_status(&self) -> Result<()> {
+        let fs = self.session.filesystems().get(self.current_fs);
+        if self.json_output {
+            let value = serde_json::json!({
+                "image": self.image_path,
+                "filesystem_index": self.current_fs,
+                "filesystem_type": fs.map(|fs| fs.fs_info.fs_type.as_str()),
+                "filesystem_label": fs.map(|fs| fs.fs_info.label.as_str()),
+                "path": self.current_path,
+                "json": self.json_output,
+                "last_match_count": self.last_matches.len(),
+                "selection_count": self.selected_targets.len(),
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok(());
+        }
+
+        println!("Image: {}", self.image_path.display());
+        if let Some(fs) = fs {
+            println!(
+                "Filesystem: {} {} \"{}\"",
+                self.current_fs, fs.fs_info.fs_type, fs.fs_info.label
+            );
+        } else {
+            println!("Filesystem: {} (missing)", self.current_fs);
+        }
+        println!("Path: {}", self.current_path);
+        println!("JSON: {}", if self.json_output { "on" } else { "off" });
+        println!("Last matches: {}", self.last_matches.len());
+        println!("Selection: {}", self.selected_targets.len());
+        Ok(())
+    }
+
+    fn command_json(&mut self, parts: &[&str]) {
+        if parts.len() != 2 {
+            println!("Usage: json on|off");
+            return;
+        }
+
+        match parts[1] {
+            "on" | "true" | "1" => {
+                self.json_output = true;
+                println!("JSON output enabled.");
+            }
+            "off" | "false" | "0" => {
+                self.json_output = false;
+                println!("JSON output disabled.");
+            }
+            _ => println!("Usage: json on|off"),
+        }
     }
 
     fn print_filesystems(&self) {
@@ -299,6 +371,7 @@ impl<'a> SessionShell<'a> {
 
         self.current_fs = idx;
         self.current_path = "/".to_string();
+        self.selected_targets.clear();
         println!("Active filesystem set to {}", idx);
         Ok(())
     }
@@ -420,7 +493,8 @@ impl<'a> SessionShell<'a> {
         };
 
         let matches = self.search(query, &options)?;
-        print_matches(&matches);
+        self.last_matches = matches;
+        self.print_matches();
         Ok(())
     }
 
@@ -448,24 +522,103 @@ impl<'a> SessionShell<'a> {
             ..Default::default()
         };
         let matches = self.search(query, &options)?;
-        print_matches(&matches);
+        self.last_matches = matches;
+        self.print_matches();
+        Ok(())
+    }
+
+    fn command_select(&mut self, line: &str) -> Result<()> {
+        let selector = command_arg(line, "select");
+        if selector.is_empty() {
+            println!("Usage: select <path|#n>");
+            return Ok(());
+        }
+
+        let selected = self.resolve_selector(selector)?;
+        if !self.selected_targets.contains(&selected) {
+            self.selected_targets.push(selected.clone());
+        }
+
+        if self.json_output {
+            self.print_selection_json()?;
+        } else {
+            println!(
+                "Selected [fs {}] {}",
+                selected.filesystem_index, selected.path
+            );
+        }
+        Ok(())
+    }
+
+    fn command_selection(&self) -> Result<()> {
+        if self.json_output {
+            self.print_selection_json()?;
+            return Ok(());
+        }
+
+        if self.selected_targets.is_empty() {
+            println!("No selected targets.");
+            return Ok(());
+        }
+
+        for (index, target) in self.selected_targets.iter().enumerate() {
+            println!(
+                "[{}] fs={} path={}",
+                index + 1,
+                target.filesystem_index,
+                target.path
+            );
+        }
+        Ok(())
+    }
+
+    fn command_clear_selection(&mut self) -> Result<()> {
+        self.selected_targets.clear();
+        if self.json_output {
+            self.print_selection_json()?;
+        } else {
+            println!("Selection cleared.");
+        }
         Ok(())
     }
 
     fn command_recover(&mut self, line: &str) -> Result<()> {
         let rest = command_arg(line, "recover");
         let Some((dest_arg, target_arg)) = parse_recover_args(rest) else {
-            println!("Usage: recover <dest> [path]");
+            println!("Usage: recover <dest> [path|#n|selected]");
             return Ok(());
         };
 
         let dest = PathBuf::from(dest_arg);
-        let target_path = target_arg
-            .map(|path| self.resolve_path(path))
-            .unwrap_or_else(|| self.current_path.clone());
-        let target = resolve_recovery_target(self.session, Some(self.current_fs), &target_path)?;
-        recover_with_fallback(self.session, &dest, Some(&target), Some(&target_path))?;
-        println!("Recovered {} to {}", target_path, dest.display());
+        let targets = match target_arg {
+            Some("selected") => {
+                if self.selected_targets.is_empty() {
+                    println!("No selected targets.");
+                    return Ok(());
+                }
+                self.selected_targets.clone()
+            }
+            Some(selector) => vec![self.resolve_selector(selector)?],
+            None => vec![SelectedTarget {
+                filesystem_index: self.current_fs,
+                path: self.current_path.clone(),
+            }],
+        };
+
+        for target_ref in targets {
+            let target = resolve_recovery_target(
+                self.session,
+                Some(target_ref.filesystem_index),
+                &target_ref.path,
+            )?;
+            recover_with_fallback(self.session, &dest, Some(&target), Some(&target_ref.path))?;
+            println!(
+                "Recovered [fs {}] {} to {}",
+                target_ref.filesystem_index,
+                target_ref.path,
+                dest.display()
+            );
+        }
         Ok(())
     }
 
@@ -485,12 +638,77 @@ impl<'a> SessionShell<'a> {
 
     fn command_save(&self, parts: &[&str]) -> Result<()> {
         if parts.len() != 2 {
-            println!("Usage: save <path.scn>");
+            println!("Usage: {} <path.scn>", parts.first().unwrap_or(&"save"));
             return Ok(());
         }
         let path = PathBuf::from(parts[1]);
         self.session.artifact().save_to_path(&path)?;
         println!("Saved session to {}", path.display());
+        Ok(())
+    }
+
+    fn resolve_selector(&self, selector: &str) -> Result<SelectedTarget> {
+        if let Some(index) = parse_match_selector(selector) {
+            let Some(search_match) = self.last_matches.get(index) else {
+                return Err(anyhow!(
+                    "search result #{} is out of range; run search first",
+                    index + 1
+                ));
+            };
+            return Ok(SelectedTarget {
+                filesystem_index: search_match.filesystem_index,
+                path: search_match.path.clone(),
+            });
+        }
+
+        Ok(SelectedTarget {
+            filesystem_index: self.current_fs,
+            path: self.resolve_path(selector),
+        })
+    }
+
+    fn print_matches(&self) {
+        if self.json_output {
+            let value = serde_json::json!({
+                "matches": self.last_matches.iter().enumerate().map(|(index, m)| {
+                    serde_json::json!({
+                        "index": index + 1,
+                        "selector": format!("#{}", index + 1),
+                        "filesystem_index": m.filesystem_index,
+                        "filesystem_label": m.filesystem_label,
+                        "filesystem_offset": m.filesystem_offset,
+                        "inode": m.inode,
+                        "path": m.path,
+                        "file_type": format!("{:?}", m.file_type),
+                        "deleted": m.deleted,
+                        "source": entry_source_label(m.source),
+                        "parent_inode": m.parent_inode,
+                    })
+                }).collect::<Vec<_>>(),
+                "count": self.last_matches.len(),
+            });
+            match serde_json::to_string_pretty(&value) {
+                Ok(rendered) => println!("{}", rendered),
+                Err(error) => println!("failed to render JSON search results: {}", error),
+            }
+            return;
+        }
+
+        print_matches(&self.last_matches);
+    }
+
+    fn print_selection_json(&self) -> Result<()> {
+        let value = serde_json::json!({
+            "selection": self.selected_targets.iter().enumerate().map(|(index, target)| {
+                serde_json::json!({
+                    "index": index + 1,
+                    "filesystem_index": target.filesystem_index,
+                    "path": target.path,
+                })
+            }).collect::<Vec<_>>(),
+            "count": self.selected_targets.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
         Ok(())
     }
 
@@ -570,9 +788,7 @@ impl<'a> SessionShell<'a> {
                 println!("Traversal warning: {}", warning);
             }
         }
-        if !self.session.has_tree(self.current_fs)
-            && self.session.attached_reader().is_some()
-        {
+        if !self.session.has_tree(self.current_fs) && self.session.attached_reader().is_some() {
             println!("Resolution mode: live-fallback");
         }
     }
@@ -703,7 +919,7 @@ fn print_matches(matches: &[SearchMatch]) {
         return;
     }
 
-    for m in matches {
+    for (index, m) in matches.iter().enumerate() {
         let deleted = if m.deleted { " [deleted]" } else { "" };
         let source = match m.source {
             EntrySource::Filesystem => String::new(),
@@ -716,8 +932,13 @@ fn print_matches(matches: &[SearchMatch]) {
             EntrySource::SyntheticOrphan => " [orphan]".to_string(),
         };
         println!(
-            "[fs {} \"{}\"] {}{}{}",
-            m.filesystem_index, m.filesystem_label, m.path, deleted, source
+            "[#{} fs {} \"{}\"] {}{}{}",
+            index + 1,
+            m.filesystem_index,
+            m.filesystem_label,
+            m.path,
+            deleted,
+            source
         );
     }
     println!("\n{} matches", matches.len());
@@ -843,6 +1064,13 @@ fn parse_recover_args(input: &str) -> Option<(&str, Option<&str>)> {
     Some((dest, target))
 }
 
+fn parse_match_selector(selector: &str) -> Option<usize> {
+    let selector = selector.trim();
+    let number = selector.strip_prefix('#')?;
+    let parsed: usize = number.parse().ok()?;
+    parsed.checked_sub(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,6 +1110,15 @@ mod tests {
             entry_source_label(EntrySource::SyntheticOrphan),
             "synthetic-orphan"
         );
+    }
+
+    #[test]
+    fn parse_match_selector_is_one_based() {
+        assert_eq!(parse_match_selector("#1"), Some(0));
+        assert_eq!(parse_match_selector("#12"), Some(11));
+        assert_eq!(parse_match_selector("1"), None);
+        assert_eq!(parse_match_selector("#0"), None);
+        assert_eq!(parse_match_selector("#abc"), None);
     }
 
     #[test]
