@@ -8,7 +8,7 @@ High-performance data recovery tool for ext4 and NTFS disk images, written in Ru
 
 ## What It Does
 
-RecoverMax reads raw disk images and recovers files from damaged or reformatted ext4 and NTFS filesystems. It provides a terminal UI plus one-shot commands for browsing filesystem trees, inspecting files, and selectively recovering data -- all without mounting the image. Streaming I/O means it handles multi-TB images without running out of memory.
+RecoverMax reads raw disk images and recovers files from damaged or reformatted ext4 and NTFS filesystems. It provides one-shot commands, a lightweight interactive image mode, and the foundation for a daemon-backed recovery workflow -- all without mounting the image. Streaming I/O means it handles multi-TB images without running out of memory.
 
 ## Demo
 
@@ -63,6 +63,9 @@ image picker, saved scan reopen, `search`, `searchfs`, `save`, plus lightweight 
 **One-shot CLI:**
 scriptable subcommands for automated recovery pipelines, including saved scan reuse and path search
 
+**Daemon foundation:**
+`daemon start`, `daemon status`, `daemon release`, `daemon stop`, and `daemon logs` manage a workspace daemon that can keep future scan/session state alive after the initiating CLI command exits
+
 ## Installation
 
 ```bash
@@ -77,25 +80,65 @@ cd recovermax
 cargo build --release
 ```
 
-The binary will be at `target/release/recovermax-cli`.
+The binary will be at `target/release/recovermax`.
 
 ## Usage
 
-### Interactive mode
+### Daemon foundation
 
-Open the terminal UI image picker:
+RecoverMax is moving toward a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The current daemon milestone manages lifecycle and workspace state; routing `scan`, browse, search, and recover commands through the daemon is the next step.
+
+Start a daemon for a workspace:
+
+```bash
+recovermax daemon start --workspace case1
+```
+
+Check status in JSON for automation and LLM agents:
+
+```bash
+recovermax daemon status --workspace case1 --json
+```
+
+Release daemon-held memory without deleting workspace metadata:
+
+```bash
+recovermax daemon release --workspace case1
+```
+
+Stop the daemon after saving state:
+
+```bash
+recovermax daemon stop --workspace case1
+```
+
+Show recent daemon logs:
+
+```bash
+recovermax daemon logs --workspace case1 --tail 50
+```
+
+### Direct modes
+
+Show daemon-first guidance:
 
 ```bash
 recovermax
 ```
 
-Open a specific image directly in the terminal UI:
+Open the image picker:
+
+```bash
+recovermax picker
+```
+
+Open a specific image directly in the lightweight interpreter:
 
 ```bash
 recovermax /path/to/image.img
 ```
 
-The image picker also lists `.scn` saved scan artifacts and can reopen them when the matching source image is present nearby.
+The image picker/interpreter can list `.scn` saved scan artifacts and reopen them when the matching source image is present nearby.
 
 ### One-shot commands
 
@@ -107,6 +150,16 @@ recovermax recover <image> -d /dest -p /home/user    # recover a path
 recovermax recover <image> -d /dest -s scan.scn      # recover using saved scan
 recovermax carve <image> -d /dest -t jpg,png,pdf     # raw carve by signature
 recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
+```
+
+Planned daemon-backed shape:
+
+```bash
+recovermax scan image.dd --workspace case1
+recovermax filesystems --workspace case1 --json
+recovermax search File --workspace case1 --json
+recovermax select '#2' --workspace case1
+recovermax recover selected --dest out --workspace case1
 ```
 
 ## Building from Source
@@ -147,6 +200,7 @@ crates/
 └── recovermax-cli/      # Binary: terminal UI + one-shot CLI
     └── src/
         ├── main.rs      # Entry point
+        ├── daemon.rs    # Workspace daemon lifecycle and control protocol
         ├── tui.rs       # Image picker + interactive search UI
         └── cli.rs       # One-shot subcommands
 ```

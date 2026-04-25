@@ -27,6 +27,15 @@ pub struct Args {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Manage the background RecoverMax daemon
+    Daemon {
+        #[command(subcommand)]
+        command: crate::daemon::DaemonCommand,
+    },
+
+    /// Open the interactive image picker
+    Picker,
+
     /// Show information about a disk image or device
     Info {
         /// Path to disk image or block device
@@ -355,6 +364,8 @@ pub enum Command {
 
 pub fn run(args: Args) -> Result<()> {
     match args.command {
+        Command::Daemon { command } => crate::daemon::run(command),
+        Command::Picker => crate::tui::run_image_picker(),
         Command::Info { image } => run_info(&image),
         Command::Scan {
             image,
