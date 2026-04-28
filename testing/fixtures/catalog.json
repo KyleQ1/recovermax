@@ -201,6 +201,14 @@
       "validates": ["filesystem-parsers", "image-readers", "scn-reader", "path-traversal", "preview-timeout"]
     },
     {
+      "id": "corrupt-scn-reader-unit",
+      "category": "security-robustness",
+      "priority": "P0",
+      "status": "unit-covered",
+      "source_types": ["scn", "synthetic-bytes"],
+      "validates": ["truncated-header-error", "invalid-magic-error", "missing-node-region-fail-closed"]
+    },
+    {
       "id": "cross-platform-raw-device",
       "category": "platform-raw-device",
       "priority": "P1",

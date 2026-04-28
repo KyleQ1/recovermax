@@ -448,6 +448,7 @@ mod tests {
     use super::*;
     use crate::fs::{EntrySource, FileType};
     use crate::session::binary_writer::ScnWriter;
+    use std::io::Write;
     use tempfile::NamedTempFile;
 
     fn create_test_scn() -> NamedTempFile {
@@ -485,6 +486,53 @@ mod tests {
         let reader = ScnReader::open(f.path()).unwrap();
         assert!(reader.is_complete());
         assert_eq!(reader.node_count(), 5);
+    }
+
+    #[test]
+    fn reader_rejects_truncated_header() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&SCN_MAGIC).unwrap();
+        f.flush().unwrap();
+
+        let error = match ScnReader::open(f.path()) {
+            Ok(_) => panic!("truncated .scn should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("File too small for .scn header"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_invalid_magic() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&[0u8; HEADER_SIZE]).unwrap();
+        f.flush().unwrap();
+
+        let error = match ScnReader::open(f.path()) {
+            Ok(_) => panic!("invalid .scn magic should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("Invalid .scn magic or version"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reader_with_missing_node_region_fails_closed() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut header = ScnHeader::new();
+        header.node_count = 1;
+        f.write_all(bytemuck::bytes_of(&header)).unwrap();
+        f.flush().unwrap();
+
+        let reader = ScnReader::open(f.path()).unwrap();
+        assert_eq!(reader.node_count(), 1);
+        assert!(reader.get_compact_node(0).is_none());
+        assert!(reader.to_session_node(0).is_none());
+        assert!(reader.search("anything", &SearchOptions::default()).is_empty());
     }
 
     #[test]
