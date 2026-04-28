@@ -64,7 +64,7 @@ image picker, saved scan reopen, `search`, `searchfs`, `save`, plus lightweight 
 scriptable subcommands for automated recovery pipelines, including saved scan reuse and path search
 
 **Daemon foundation:**
-`daemon start`, `daemon status`, `daemon release`, `daemon stop`, and `daemon logs` manage a workspace daemon that can keep future scan/session state alive after the initiating CLI command exits
+workspace daemon for long-running scans, JSON status, cancellation, in-memory session reuse, browse/search/select, and recovery across separate CLI calls
 
 ## Installation
 
@@ -86,7 +86,7 @@ The binary will be at `target/release/recovermax`.
 
 ### Daemon foundation
 
-RecoverMax is moving toward a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The current daemon milestone manages lifecycle, workspace state, and daemon-backed scans. Routing browse, search, and recover commands through the daemon is the next step.
+RecoverMax supports a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The daemon owns the active recovery session, keeps it hot in memory for fast follow-up commands, and checkpoints scan metadata to the workspace.
 
 Start a daemon for a workspace:
 
