@@ -108,6 +108,14 @@
       "validates": ["same-source-destination-block", "free-space-check", "filename-collisions", "invalid-names", "partial-output-marking"]
     },
     {
+      "id": "destination-path-safety-unit",
+      "category": "recovery-safety",
+      "priority": "P0",
+      "status": "unit-covered",
+      "source_types": ["session", "raw-image"],
+      "validates": ["absolute-path-normalization", "path-traversal-rejection", "windows-drive-prefix-rejection", "nul-path-rejection", "collision-suffixes"]
+    },
+    {
       "id": "scn-compatibility-migration",
       "category": "session-format",
       "priority": "P0",

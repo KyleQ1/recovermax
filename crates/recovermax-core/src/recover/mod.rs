@@ -1,3 +1,4 @@
+pub mod destination;
 pub mod orphans;
 pub mod scoring;
 
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use self::destination::safe_destination_path;
 use crate::fs::ext4::Ext4Fs;
 use crate::fs::{DirEntry, FileType};
 use crate::io::ImageReader;
@@ -155,8 +157,8 @@ impl<'a> Recoverer<'a> {
         node: &SessionNode,
         output_path: Option<&str>,
     ) -> Result<()> {
-        let relative_path = output_path.unwrap_or(&node.path).trim_start_matches('/');
-        let dest_path = self.dest.join(relative_path);
+        let relative_path = output_path.unwrap_or(&node.path);
+        let dest_path = safe_destination_path(self.dest, relative_path)?;
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -226,8 +228,8 @@ impl<'a> Recoverer<'a> {
         let inode_num = node
             .inode
             .ok_or_else(|| anyhow::anyhow!("session node {} has no inode", node.path))?;
-        let relative_path = output_path.unwrap_or(&node.path).trim_start_matches('/');
-        let dest_path = self.dest.join(relative_path);
+        let relative_path = output_path.unwrap_or(&node.path);
+        let dest_path = safe_destination_path(self.dest, relative_path)?;
         std::fs::create_dir_all(&dest_path)?;
 
         let entries = ext4.list_directory(inode_num)?;
@@ -242,7 +244,7 @@ impl<'a> Recoverer<'a> {
         self.recover_recursive_with_visited(
             ext4,
             &entries,
-            PathBuf::from(relative_path),
+            destination::sanitize_recovery_path(relative_path)?,
             None,
             &pb,
             &mut visited_dirs,
@@ -311,7 +313,17 @@ impl<'a> Recoverer<'a> {
 
             match entry.file_type {
                 FileType::Directory => {
-                    let dest_dir = self.dest.join(&entry_path);
+                    let dest_dir = match safe_destination_path(self.dest, &entry_path_str) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Skipping unsafe directory path {}: {}",
+                                entry_path.display(),
+                                error
+                            );
+                            continue;
+                        }
+                    };
                     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
                         tracing::warn!("Cannot create dir {}: {}", dest_dir.display(), e);
                         continue;
@@ -329,7 +341,11 @@ impl<'a> Recoverer<'a> {
                                     visited_dirs,
                                     depth + 1,
                                 ) {
-                                    tracing::warn!("Error recovering {}: {}", dest_dir.display(), e);
+                                    tracing::warn!(
+                                        "Error recovering {}: {}",
+                                        dest_dir.display(),
+                                        e
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -341,10 +357,24 @@ impl<'a> Recoverer<'a> {
 
                 FileType::RegularFile => {
                     if entry.inode > 0 {
-                        let dest_file = self.dest.join(&entry_path);
+                        let dest_file = match safe_destination_path(self.dest, &entry_path_str) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Skipping unsafe file path {}: {}",
+                                    entry_path.display(),
+                                    error
+                                );
+                                continue;
+                            }
+                        };
                         if let Some(parent) = dest_file.parent() {
                             if let Err(e) = std::fs::create_dir_all(parent) {
-                                tracing::warn!("Cannot create parent dir for {}: {}", dest_file.display(), e);
+                                tracing::warn!(
+                                    "Cannot create parent dir for {}: {}",
+                                    dest_file.display(),
+                                    e
+                                );
                                 continue;
                             }
                         }
@@ -408,7 +438,17 @@ impl<'a> Recoverer<'a> {
 
                 FileType::Symlink => {
                     if entry.inode > 0 {
-                        let dest_file = self.dest.join(&entry_path);
+                        let dest_file = match safe_destination_path(self.dest, &entry_path_str) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Skipping unsafe symlink path {}: {}",
+                                    entry_path.display(),
+                                    error
+                                );
+                                continue;
+                            }
+                        };
                         if let Some(parent) = dest_file.parent() {
                             std::fs::create_dir_all(parent)?;
                         }
