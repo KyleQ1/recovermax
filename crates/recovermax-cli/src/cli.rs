@@ -2698,6 +2698,7 @@ mod tests {
     use super::*;
 
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use recovermax_core::fs::FsInfo;
@@ -2712,16 +2713,20 @@ mod tests {
         SessionNode,
     };
 
+    static UNIQUE_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn unique_path(prefix: &str, suffix: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
+        let sequence = UNIQUE_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "recovermax-{}-{}-{}{}",
+            "recovermax-{}-{}-{}-{}{}",
             prefix,
             std::process::id(),
             stamp,
+            sequence,
             suffix
         ))
     }
