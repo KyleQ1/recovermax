@@ -149,6 +149,40 @@ fn mbr_partition_type_names() {
     assert_eq!(parts[3].fs_type, "Linux RAID");
 }
 
+#[test]
+fn mbr_skips_partition_starting_beyond_image() {
+    let mut img = build_mbr(&[
+        (0x83, 2048, 1024),
+        (0x83, 999_999, 1024),
+    ]);
+    img.extend(vec![0u8; 4 * 1024 * 1024]);
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let parts = scanner.detect_partitions().unwrap();
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].offset, 2048 * 512);
+}
+
+#[test]
+fn mbr_skips_partition_ending_beyond_image() {
+    let mut img = build_mbr(&[
+        (0x83, 2048, 1024),
+        (0x83, 4096, 999_999),
+    ]);
+    img.extend(vec![0u8; 4 * 1024 * 1024]);
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let parts = scanner.detect_partitions().unwrap();
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].offset, 2048 * 512);
+}
+
 // --- GPT tests ---
 
 fn build_gpt_image(partitions: &[(&str, u64, u64)]) -> Vec<u8> {

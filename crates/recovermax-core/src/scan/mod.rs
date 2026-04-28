@@ -204,8 +204,24 @@ impl<'a> Scanner<'a> {
             let lba_count = u32::from_le_bytes(data[offset + 12..offset + 16].try_into()?);
 
             if part_type != 0 && lba_count > 0 {
-                let byte_offset = lba_start as u64 * 512;
-                let byte_size = lba_count as u64 * 512;
+                let Some(byte_offset) = (lba_start as u64).checked_mul(512) else {
+                    continue;
+                };
+                let Some(byte_size) = (lba_count as u64).checked_mul(512) else {
+                    continue;
+                };
+                let Some(byte_end) = byte_offset.checked_add(byte_size) else {
+                    continue;
+                };
+                if byte_offset >= self.reader.len() || byte_end > self.reader.len() {
+                    tracing::warn!(
+                        "Skipping MBR partition {} with out-of-image byte range {}..{}",
+                        i + 1,
+                        byte_offset,
+                        byte_end
+                    );
+                    continue;
+                }
 
                 let type_name = mbr_type_name(part_type);
 

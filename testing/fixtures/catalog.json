@@ -107,6 +107,14 @@
       "validates": ["invalid-entry-size-fail-closed", "entry-table-beyond-image-fail-closed", "reversed-lba-range-skipped", "partial-valid-results"]
     },
     {
+      "id": "mbr-malformed-entry-unit",
+      "category": "partition-layout",
+      "priority": "P0",
+      "status": "unit-covered",
+      "source_types": ["raw-image", "mbr"],
+      "validates": ["partition-start-beyond-image-skipped", "partition-end-beyond-image-skipped", "partial-valid-results"]
+    },
+    {
       "id": "destination-safety-matrix",
       "category": "recovery-safety",
       "priority": "P0",
