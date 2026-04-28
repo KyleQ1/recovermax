@@ -227,7 +227,10 @@ impl<'a> Scanner<'a> {
 
     fn try_gpt(&self) -> Result<Option<Vec<Partition>>> {
         // GPT header is at LBA 1 (byte offset 512)
-        let header = self.reader.read_at(512, 92)?;
+        let header = match self.reader.read_at(512, 92) {
+            Ok(header) if header.len() >= 92 => header,
+            _ => return Ok(None),
+        };
 
         // Check "EFI PART" signature
         if &header[0..8] != b"EFI PART" {
@@ -237,12 +240,26 @@ impl<'a> Scanner<'a> {
         let entry_lba = u64::from_le_bytes(header[72..80].try_into()?);
         let entry_count = u32::from_le_bytes(header[80..84].try_into()?);
         let entry_size = u32::from_le_bytes(header[84..88].try_into()?);
+        if entry_size < 128 {
+            tracing::warn!("Skipping GPT with invalid partition entry size {entry_size}");
+            return Ok(None);
+        }
+
+        let entry_table_offset = match entry_lba.checked_mul(512) {
+            Some(offset) if offset < self.reader.len() => offset,
+            _ => return Ok(None),
+        };
+        let entries_available = ((self.reader.len() - entry_table_offset) / entry_size as u64)
+            .min(entry_count as u64) as u32;
 
         let mut partitions = Vec::new();
 
-        for i in 0..entry_count {
+        for i in 0..entries_available {
             let offset = entry_lba * 512 + i as u64 * entry_size as u64;
             let entry = self.reader.read_at(offset, entry_size as usize)?;
+            if entry.len() < 128 {
+                continue;
+            }
 
             // Parse partition type GUID (mixed-endian)
             let type_guid_bytes: [u8; 16] = entry[0..16].try_into()?;
@@ -254,6 +271,15 @@ impl<'a> Scanner<'a> {
             let last_lba = u64::from_le_bytes(entry[40..48].try_into()?);
 
             if first_lba == 0 && last_lba == 0 {
+                continue;
+            }
+            if last_lba < first_lba {
+                tracing::warn!(
+                    "Skipping GPT partition entry {} with invalid LBA range {}..{}",
+                    i + 1,
+                    first_lba,
+                    last_lba
+                );
                 continue;
             }
 
@@ -275,8 +301,18 @@ impl<'a> Scanner<'a> {
                 })
                 .collect();
 
-            let byte_offset = first_lba * 512;
-            let byte_size = (last_lba - first_lba + 1) * 512;
+            let Some(byte_offset) = first_lba.checked_mul(512) else {
+                continue;
+            };
+            let Some(sector_count) = last_lba
+                .checked_sub(first_lba)
+                .and_then(|count| count.checked_add(1))
+            else {
+                continue;
+            };
+            let Some(byte_size) = sector_count.checked_mul(512) else {
+                continue;
+            };
 
             // Try to detect filesystem type, fall back to GPT type GUID name
             let type_guid = gpt_type_guid_to_string(&type_guid_bytes);

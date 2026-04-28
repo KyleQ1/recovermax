@@ -228,6 +228,51 @@ fn detect_gpt_multiple_partitions() {
     assert_eq!(parts[2].name, "home");
 }
 
+#[test]
+fn gpt_invalid_entry_size_fails_closed() {
+    let mut img = build_gpt_image(&[("bad-entry-size", 2048, 4095)]);
+    let hdr = 512;
+    img[hdr + 84..hdr + 88].copy_from_slice(&16u32.to_le_bytes());
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let parts = scanner.detect_partitions().unwrap();
+
+    assert!(parts.is_empty());
+}
+
+#[test]
+fn gpt_entry_table_beyond_image_fails_closed() {
+    let mut img = build_gpt_image(&[("bad-table", 2048, 4095)]);
+    let hdr = 512;
+    img[hdr + 72..hdr + 80].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let parts = scanner.detect_partitions().unwrap();
+
+    assert!(parts.is_empty());
+}
+
+#[test]
+fn gpt_skips_partition_with_reversed_lba_range() {
+    let img = build_gpt_image(&[
+        ("bad", 4096, 2048),
+        ("good", 8192, 12287),
+    ]);
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let scanner = Scanner::new(&reader);
+    let parts = scanner.detect_partitions().unwrap();
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "good");
+    assert_eq!(parts[0].offset, 8192 * 512);
+}
+
 // --- ext4 detection ---
 
 #[test]
