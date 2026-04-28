@@ -37,6 +37,37 @@ Use three layers of testing:
    - Larger images or corpora images with real-world clutter
    - Best for timing, RSS, and cache behavior
 
+## Fixture Coverage Scorecard
+
+The fixture catalog at `testing/fixtures/catalog.json` is the source of truth
+for professional recovery quality coverage. It tracks available, generated,
+unit-covered, planned, external, and manual test cases across filesystems,
+partitions, RAID, image formats, failed media, remote sources, hashing,
+destination safety, performance, and fuzz/security cases.
+
+Run the scorecard:
+
+```bash
+python3 scripts/fixture-scorecard.py
+```
+
+Run the local quality gate:
+
+```bash
+scripts/run-quality-suite.sh
+```
+
+Run the quality gate plus generated ext4 fixture validation when the host has
+`mkfs.ext4`, `debugfs`, and `e2fsck`:
+
+```bash
+scripts/run-quality-suite.sh --with-generated-fixtures
+```
+
+Do not mark a feature as supported until the catalog has an available/generated
+fixture and an end-to-end test for scan, browse/search, and recover where that
+feature applies.
+
 ## Local Layout
 
 Use the same layout for every fixture and dataset.
@@ -52,6 +83,7 @@ testing/
       notes.md
   fixtures/
     README.md
+    catalog.json
     ext4/
       synthetic-basic/
         manifest.json

@@ -1,0 +1,204 @@
+{
+  "schema": 1,
+  "description": "RecoverMax professional recovery fixture catalog. Status tracks whether a case is automated, locally generated, externally staged, or still planned.",
+  "status_values": [
+    "available",
+    "generated-script",
+    "unit-covered",
+    "planned",
+    "external-needed",
+    "manual-only"
+  ],
+  "quality_gates": [
+    "No filesystem is marked supported without clean, deleted, damaged, scan, browse, search, recover, and report fixtures where applicable.",
+    "No image/container format is marked supported without open, scan/browse, metadata, and corrupt-header tests.",
+    "No RAID/disk-manager support is marked supported without correct, degraded, wrong-order, and saved-definition reload tests.",
+    "No rescue-imaging support is marked supported without bad-sector, retry, resume, reverse-pass, and map import/export tests.",
+    "No parser is production-ready until corrupted metadata returns partial results with warnings instead of panics."
+  ],
+  "cases": [
+    {
+      "id": "ext4-public-cfreds-dfr-01-ext",
+      "category": "filesystem-public-corpus",
+      "priority": "P0",
+      "status": "available",
+      "manifest": "testing/datasets/cfreds-dfr-01-ext/manifest.json",
+      "filesystems": ["ext2", "ext3", "ext4"],
+      "source_types": ["raw-image", "mbr"],
+      "validates": ["scan", "session-reopen", "tree", "search", "deleted-root-entries", "recover"],
+      "automation": ["recovermax-diff-validate"]
+    },
+    {
+      "id": "ext4-synthetic-session-tree",
+      "category": "filesystem-generated",
+      "priority": "P0",
+      "status": "generated-script",
+      "manifest": "scripts/out/fixtures/session-tree.manifest.json",
+      "filesystems": ["ext4"],
+      "source_types": ["raw-image"],
+      "validates": ["scan", "tree", "stat", "search", "recover", "sparse-file", "symlink"],
+      "automation": ["build-ext4-fixtures", "recovermax-diff-validate", "benchmark-session-workflows"]
+    },
+    {
+      "id": "ext4-synthetic-deleted",
+      "category": "filesystem-generated",
+      "priority": "P0",
+      "status": "generated-script",
+      "manifest": "scripts/out/fixtures/deleted.manifest.json",
+      "filesystems": ["ext4"],
+      "source_types": ["raw-image"],
+      "validates": ["deleted-inode", "deleted-path", "search", "recover"],
+      "automation": ["build-ext4-fixtures", "recovermax-diff-validate"]
+    },
+    {
+      "id": "ext4-unit-parser-corruption",
+      "category": "parser-unit",
+      "priority": "P0",
+      "status": "unit-covered",
+      "filesystems": ["ext4"],
+      "source_types": ["synthetic-bytes"],
+      "validates": ["superblock", "feature-flags", "inode", "directory", "corruption-errors"],
+      "automation": ["cargo-test"]
+    },
+    {
+      "id": "ntfs-unit-parser-basics",
+      "category": "parser-unit",
+      "priority": "P0",
+      "status": "unit-covered",
+      "filesystems": ["ntfs"],
+      "source_types": ["synthetic-bytes"],
+      "validates": ["boot-sector", "mft-record", "data-runs", "corruption-errors"],
+      "automation": ["cargo-test"]
+    },
+    {
+      "id": "ntfs-public-fragmented-deleted",
+      "category": "filesystem-public-corpus",
+      "priority": "P0",
+      "status": "external-needed",
+      "filesystems": ["ntfs"],
+      "source_types": ["raw-image", "mbr", "gpt"],
+      "validates": ["fragmented-data-runs", "deleted-records", "sparse-files", "ads", "recover"],
+      "recommended_sources": ["Digital Corpora NPS NTFS images", "CFReDS DFR NTFS images"]
+    },
+    {
+      "id": "fat-exfat-removable-media",
+      "category": "filesystem-generated",
+      "priority": "P0",
+      "status": "planned",
+      "filesystems": ["fat12", "fat16", "fat32", "exfat"],
+      "source_types": ["raw-image", "removable-media"],
+      "validates": ["long-names", "short-names", "deleted-directory-entries", "fragmented-cluster-chains", "recover"]
+    },
+    {
+      "id": "partition-damaged-gpt-mbr",
+      "category": "partition-layout",
+      "priority": "P0",
+      "status": "planned",
+      "filesystems": ["ext4", "ntfs", "fat32"],
+      "source_types": ["raw-image", "mbr", "gpt"],
+      "validates": ["primary-gpt-damaged", "backup-gpt-only", "deleted-partition", "manual-offset", "filesystem-override"]
+    },
+    {
+      "id": "destination-safety-matrix",
+      "category": "recovery-safety",
+      "priority": "P0",
+      "status": "planned",
+      "filesystems": ["ext4", "ntfs", "fat32"],
+      "source_types": ["raw-image", "mounted-volume", "raw-device"],
+      "validates": ["same-source-destination-block", "free-space-check", "filename-collisions", "invalid-names", "partial-output-marking"]
+    },
+    {
+      "id": "scn-compatibility-migration",
+      "category": "session-format",
+      "priority": "P0",
+      "status": "unit-covered",
+      "source_types": ["scn"],
+      "validates": ["v1-read", "binary-read", "metadata-path-resolution", "corrupt-scn-errors", "lazy-loading"],
+      "automation": ["cargo-test"]
+    },
+    {
+      "id": "rescue-imaging-bad-sector-map",
+      "category": "failed-media",
+      "priority": "P0",
+      "status": "planned",
+      "source_types": ["raw-device", "simulated-failing-source", "map-backed-image"],
+      "validates": ["bad-sectors", "timeouts", "retry-success", "resume", "reverse-pass", "partial-scan-warnings"]
+    },
+    {
+      "id": "raid-manual-0-1-5-6-10",
+      "category": "raid-virtual-source",
+      "priority": "P1",
+      "status": "planned",
+      "filesystems": ["ext4", "ntfs"],
+      "source_types": ["raid0", "raid1", "raid5", "raid6", "raid10"],
+      "validates": ["stripe-size", "disk-order", "parity-layout", "missing-disk", "wrong-order-warning", "saved-definition-reload"]
+    },
+    {
+      "id": "lvm-mdadm-autodetect",
+      "category": "disk-manager",
+      "priority": "P1",
+      "status": "planned",
+      "filesystems": ["ext4", "xfs"],
+      "source_types": ["lvm", "mdadm"],
+      "validates": ["metadata-detect", "multi-component-assembly", "degraded-warning", "browse", "recover"]
+    },
+    {
+      "id": "image-format-virtual-disks",
+      "category": "image-format",
+      "priority": "P1",
+      "status": "planned",
+      "filesystems": ["ext4", "ntfs"],
+      "source_types": ["vmdk", "vhd", "vhdx", "vdi", "dmg"],
+      "validates": ["open", "metadata", "scan", "browse", "corrupt-header-error"]
+    },
+    {
+      "id": "forensic-image-formats-ewf-aff",
+      "category": "image-format",
+      "priority": "P1",
+      "status": "planned",
+      "source_types": ["e01", "ewf", "aff"],
+      "validates": ["open", "segment-chain", "metadata", "hash", "scan", "report"]
+    },
+    {
+      "id": "remote-source-network-matrix",
+      "category": "remote-source",
+      "priority": "P1",
+      "status": "planned",
+      "source_types": ["ssh-sftp", "smb", "nfs", "iscsi", "recovermax-agent"],
+      "validates": ["remote-open", "remote-hash", "disconnect-resume", "remote-image-copy", "read-only-agent-enumeration"]
+    },
+    {
+      "id": "hash-known-good-known-bad",
+      "category": "forensic-hash",
+      "priority": "P1",
+      "status": "planned",
+      "source_types": ["raw-image", "recovered-files"],
+      "validates": ["sha256", "md5", "sha1", "known-good-ignore", "known-bad-hit", "hash-inventory-export", "report"]
+    },
+    {
+      "id": "performance-scale-tree",
+      "category": "performance",
+      "priority": "P1",
+      "status": "planned",
+      "filesystems": ["ext4", "ntfs"],
+      "source_types": ["large-sparse-image"],
+      "validates": ["million-files", "large-directory", "deep-tree", "low-memory-budget", "gui-responsiveness"]
+    },
+    {
+      "id": "parser-fuzz-suite",
+      "category": "security-robustness",
+      "priority": "P1",
+      "status": "planned",
+      "source_types": ["synthetic-bytes"],
+      "validates": ["filesystem-parsers", "image-readers", "scn-reader", "path-traversal", "preview-timeout"]
+    },
+    {
+      "id": "cross-platform-raw-device",
+      "category": "platform-raw-device",
+      "priority": "P1",
+      "status": "manual-only",
+      "source_types": ["windows-physicaldrive", "macos-disk", "linux-block-device"],
+      "validates": ["elevated-read", "permission-error", "readonly-state", "smart", "sector-size", "same-source-api"]
+    }
+  ]
+}
