@@ -1,8 +1,10 @@
-use std::fs::{self, OpenOptions};
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 use crate::cli::{
     list_children_with_fallback, recover_with_fallback, resolve_node_with_fallback,
-    resolve_recovery_target,
+    resolve_recovery_target, walk_tree_with_fallback,
 };
 use recovermax_core::io::ImageReader;
 use recovermax_core::scan::{ScanEvent, ScanOptions, Scanner};
@@ -19,6 +21,7 @@ use recovermax_core::session::{open_session_for_image, RecoverySession, Recovery
 use serde_json::{json, Value};
 
 const STATE_FILE: &str = "daemon.json";
+const LOCK_FILE: &str = "daemon.lock";
 const LOG_FILE: &str = "daemon.log";
 const STDERR_FILE: &str = "daemon.stderr.log";
 const PROTOCOL_VERSION: u32 = 1;
@@ -69,6 +72,21 @@ pub enum DaemonCommand {
         json: bool,
     },
 
+    /// Cancel a running daemon task
+    Cancel {
+        /// Workspace directory for durable session state
+        #[arg(long)]
+        workspace: PathBuf,
+
+        /// Task id to cancel
+        #[arg(long)]
+        task: u64,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show daemon logs for a workspace
     Logs {
         /// Workspace directory for durable session state
@@ -95,6 +113,11 @@ pub fn run(command: DaemonCommand) -> Result<()> {
         DaemonCommand::Status { workspace, json } => print_status(&workspace, json),
         DaemonCommand::Release { workspace, json } => send_control(&workspace, "release", json),
         DaemonCommand::Stop { workspace, json } => send_control(&workspace, "stop", json),
+        DaemonCommand::Cancel {
+            workspace,
+            task,
+            json,
+        } => send_control_payload(&workspace, "cancel", json!({ "task_id": task }), json),
         DaemonCommand::Logs { workspace, tail } => print_logs(&workspace, tail),
         DaemonCommand::Run { workspace } => run_daemon(&workspace),
     }
@@ -108,13 +131,12 @@ pub(crate) fn submit_scan(
     json_output: bool,
 ) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
     let image = absolute_path(image)?;
     let output = output
         .map(|path| absolute_path(&path))
         .transpose()?
         .unwrap_or_else(|| workspace.join("scan.scn"));
-    let response = request_with_payload(
+    let response = request_or_start(
         &workspace,
         "scan",
         json!({
@@ -129,8 +151,7 @@ pub(crate) fn submit_scan(
 
 pub(crate) fn submit_filesystems(workspace: &Path, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request(&workspace, "filesystems")?;
+    let response = request_or_start(&workspace, "filesystems", Value::Null)?;
     print_response(&response, json_output);
     Ok(())
 }
@@ -143,14 +164,53 @@ pub(crate) fn submit_ls(
     json_output: bool,
 ) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request_with_payload(
+    let response = request_or_start(
         &workspace,
         "ls",
         json!({
             "path": path,
             "filesystem_index": fs,
             "long": long,
+        }),
+    )?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_tree(
+    workspace: &Path,
+    path: &str,
+    fs: Option<usize>,
+    depth: usize,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    let response = request_or_start(
+        &workspace,
+        "tree",
+        json!({
+            "path": path,
+            "filesystem_index": fs,
+            "depth": depth,
+        }),
+    )?;
+    print_response(&response, json_output);
+    Ok(())
+}
+
+pub(crate) fn submit_stat(
+    workspace: &Path,
+    target: &str,
+    fs: Option<usize>,
+    json_output: bool,
+) -> Result<()> {
+    let workspace = prepare_workspace(workspace)?;
+    let response = request_or_start(
+        &workspace,
+        "stat",
+        json!({
+            "target": target,
+            "filesystem_index": fs,
         }),
     )?;
     print_response(&response, json_output);
@@ -166,8 +226,7 @@ pub(crate) fn submit_search(
     json_output: bool,
 ) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request_with_payload(
+    let response = request_or_start(
         &workspace,
         "search",
         json!({
@@ -183,8 +242,7 @@ pub(crate) fn submit_search(
 
 pub(crate) fn submit_select(workspace: &Path, selector: &str, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request_with_payload(
+    let response = request_or_start(
         &workspace,
         "select",
         json!({
@@ -197,8 +255,7 @@ pub(crate) fn submit_select(workspace: &Path, selector: &str, json_output: bool)
 
 pub(crate) fn submit_selection(workspace: &Path, json_output: bool) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request(&workspace, "selection")?;
+    let response = request_or_start(&workspace, "selection", Value::Null)?;
     print_response(&response, json_output);
     Ok(())
 }
@@ -210,8 +267,7 @@ pub(crate) fn submit_recover(
     json_output: bool,
 ) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    ensure_daemon(&workspace)?;
-    let response = request_with_payload(
+    let response = request_or_start(
         &workspace,
         "recover",
         json!({
@@ -239,6 +295,14 @@ fn start_daemon(workspace: &Path, json_output: bool) -> Result<()> {
 fn ensure_daemon(workspace: &Path) -> Result<()> {
     if request(workspace, "status").is_ok() {
         return Ok(());
+    }
+    let lock_path = lock_path(workspace);
+    if lock_path.exists() {
+        bail!(
+            "workspace {} is locked but the daemon did not answer; run 'recovermax daemon status --workspace {}' or stop the stale daemon before retrying",
+            workspace.display(),
+            workspace.display()
+        );
     }
     let state_path = state_path(&workspace);
     if state_path.exists() {
@@ -297,8 +361,17 @@ fn print_status(workspace: &Path, json_output: bool) -> Result<()> {
 }
 
 fn send_control(workspace: &Path, command: &str, json_output: bool) -> Result<()> {
+    send_control_payload(workspace, command, Value::Null, json_output)
+}
+
+fn send_control_payload(
+    workspace: &Path,
+    command: &str,
+    payload: Value,
+    json_output: bool,
+) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
-    let response = request(&workspace, command)
+    let response = request_with_payload(&workspace, command, payload)
         .with_context(|| format!("daemon is not reachable for {}", workspace.display()))?;
     print_response(&response, json_output);
     Ok(())
@@ -318,6 +391,7 @@ fn print_logs(workspace: &Path, tail: usize) -> Result<()> {
 
 fn run_daemon(workspace: &Path) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
+    let _lock = create_daemon_lock(&workspace)?;
     let listener =
         TcpListener::bind("127.0.0.1:0").context("failed to bind daemon control port")?;
     let address = listener
@@ -337,6 +411,7 @@ fn run_daemon(workspace: &Path) -> Result<()> {
         active_fs: Some(0),
         last_matches: Vec::new(),
         selected_targets: Vec::new(),
+        cancel_flags: HashMap::new(),
         active_session: None,
     }));
 
@@ -366,6 +441,7 @@ fn run_daemon(workspace: &Path) -> Result<()> {
 
     append_log(&workspace, "daemon stopped")?;
     write_state(&workspace, &state.lock().expect("daemon state poisoned"))?;
+    let _ = fs::remove_file(lock_path(&workspace));
     Ok(())
 }
 
@@ -412,9 +488,16 @@ fn handle_client(
         "stop" => {
             let mut guard = state.lock().expect("daemon state poisoned");
             guard.stopping = true;
+            for flag in guard.cancel_flags.values() {
+                flag.store(true, Ordering::Relaxed);
+            }
             write_state(workspace, &guard)?;
             append_log(workspace, "stop requested")?;
             status_response(workspace, &guard, true)
+        }
+        "cancel" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            cancel_response(workspace, Arc::clone(&state), payload)?
         }
         "scan" => {
             let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
@@ -424,6 +507,14 @@ fn handle_client(
         "ls" => {
             let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
             ls_response(workspace, Arc::clone(&state), payload)?
+        }
+        "tree" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            tree_response(workspace, Arc::clone(&state), payload)?
+        }
+        "stat" => {
+            let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
+            stat_response(workspace, Arc::clone(&state), payload)?
         }
         "search" => {
             let payload = request.get("payload").cloned().unwrap_or_else(|| json!({}));
@@ -443,6 +534,7 @@ fn handle_client(
             &format!("unknown daemon command: {other}"),
         ),
     };
+    let response = attach_request_id(response, request.get("request_id"));
     write_json(stream, &response)?;
     Ok(())
 }
@@ -555,6 +647,105 @@ fn ls_response(
         "next_actions": [
             "recovermax ls <path> --workspace <workspace> --json",
             "recovermax search <query> --workspace <workspace> --json"
+        ],
+    }))
+}
+
+fn tree_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    ensure_active_session(workspace, &state)?;
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(normalize_daemon_path)
+        .unwrap_or_else(|| "/".to_string());
+    let fs = payload
+        .get("filesystem_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let depth = payload
+        .get("depth")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(64);
+
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let fs_index = fs.or(guard.active_fs).unwrap_or(0);
+    guard.active_fs = Some(fs_index);
+    let Some(session) = guard.active_session.as_mut() else {
+        return Ok(error_response(
+            "no_active_session",
+            "workspace has no active scan session",
+        ));
+    };
+    let entries = walk_tree_with_fallback(session, fs_index, &path, depth)?
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "depth": entry.depth,
+                "node": node_to_json(&entry.node, false),
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = entries.len();
+    write_state(workspace, &guard)?;
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "filesystem_index": fs_index,
+        "path": path,
+        "depth": depth,
+        "entries": entries,
+        "count": count,
+        "next_actions": [
+            "recovermax stat <path> --workspace <workspace> --json",
+            "recovermax ls <path> --workspace <workspace> --json"
+        ],
+    }))
+}
+
+fn stat_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    ensure_active_session(workspace, &state)?;
+    let target = payload
+        .get("target")
+        .and_then(Value::as_str)
+        .map(normalize_daemon_path)
+        .unwrap_or_else(|| "/".to_string());
+    let fs = payload
+        .get("filesystem_index")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let fs_index = fs.or(guard.active_fs).unwrap_or(0);
+    guard.active_fs = Some(fs_index);
+    let Some(session) = guard.active_session.as_mut() else {
+        return Ok(error_response(
+            "no_active_session",
+            "workspace has no active scan session",
+        ));
+    };
+    let node = resolve_node_with_fallback(session, fs_index, &target)?;
+    write_state(workspace, &guard)?;
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "filesystem_index": fs_index,
+        "target": target,
+        "node": node_to_json(&node, true),
+        "next_actions": [
+            "recovermax recover <path> --dest <dir> --workspace <workspace> --json"
         ],
     }))
 }
@@ -746,6 +937,41 @@ fn recover_response(
     }))
 }
 
+fn cancel_response(
+    workspace: &Path,
+    state: Arc<Mutex<RuntimeState>>,
+    payload: Value,
+) -> Result<Value> {
+    let task_id = payload
+        .get("task_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("cancel request is missing task_id"))?;
+    let mut guard = state.lock().expect("daemon state poisoned");
+    let Some(task) = guard.tasks.iter_mut().find(|task| task.id == task_id) else {
+        return Ok(error_response(
+            "task_not_found",
+            &format!("task {task_id} not found"),
+        ));
+    };
+    task.cancel_requested = true;
+    if task.status == "queued" || task.status == "running" {
+        task.status = "cancelling".to_string();
+    }
+    if let Some(flag) = guard.cancel_flags.get(&task_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+    write_state(workspace, &guard)?;
+    append_log(workspace, &format!("cancel requested for task {task_id}"))?;
+    Ok(json!({
+        "ok": true,
+        "version": PROTOCOL_VERSION,
+        "state": "online",
+        "workspace": workspace,
+        "task_id": task_id,
+        "task": guard.tasks.iter().find(|task| task.id == task_id).map(task_to_json),
+    }))
+}
+
 fn ensure_active_session(workspace: &Path, state: &Arc<Mutex<RuntimeState>>) -> Result<()> {
     let mut guard = state.lock().expect("daemon state poisoned");
     if guard.active_session.is_none() {
@@ -882,9 +1108,13 @@ fn start_scan_task(
             filesystems_found: 0,
             started_unix: unix_now(),
             completed_unix: None,
+            cancel_requested: false,
             error: None,
         };
         guard.tasks.push(task.clone());
+        guard
+            .cancel_flags
+            .insert(task_id, Arc::new(AtomicBool::new(false)));
         write_state(workspace, &guard)?;
         task
     };
@@ -902,6 +1132,14 @@ fn start_scan_task(
     let workspace_for_thread = workspace.to_path_buf();
     let state_for_thread = Arc::clone(&state);
     let task_id = task.id;
+    let cancel_flag = {
+        let guard = state.lock().expect("daemon state poisoned");
+        guard
+            .cancel_flags
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
+    };
     std::thread::spawn(move || {
         if let Err(error) = run_scan_task(
             &workspace_for_thread,
@@ -910,6 +1148,7 @@ fn start_scan_task(
             image,
             output,
             deep_scan,
+            cancel_flag,
         ) {
             let _ = append_log(
                 &workspace_for_thread,
@@ -939,6 +1178,7 @@ fn run_scan_task(
     image: PathBuf,
     output: PathBuf,
     deep_scan: bool,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     update_task(workspace, &state, task_id, |task| {
         task.status = "running".to_string();
@@ -962,6 +1202,7 @@ fn run_scan_task(
         let options = ScanOptions {
             deep_scan,
             on_event: Some(Box::new(scan_callback)),
+            cancel_flag: Some(Arc::clone(&cancel_flag)),
             ..Default::default()
         };
         let scanner = Scanner::new(&reader);
@@ -1009,14 +1250,27 @@ fn run_scan_task(
     })();
 
     if let Err(error) = result {
+        let cancelled = cancel_flag.load(Ordering::Relaxed)
+            || format!("{error:#}").to_ascii_lowercase().contains("cancel");
         update_task(workspace, &state, task_id, |task| {
-            task.status = "failed".to_string();
-            task.phase = "failed".to_string();
+            task.status = if cancelled { "cancelled" } else { "failed" }.to_string();
+            task.phase = if cancelled { "cancelled" } else { "failed" }.to_string();
             task.completed_unix = Some(unix_now());
             task.error = Some(format!("{error:#}"));
         })?;
+        state
+            .lock()
+            .expect("daemon state poisoned")
+            .cancel_flags
+            .remove(&task_id);
         return Err(error);
     }
+
+    state
+        .lock()
+        .expect("daemon state poisoned")
+        .cancel_flags
+        .remove(&task_id);
 
     Ok(())
 }
@@ -1082,6 +1336,22 @@ fn request(workspace: &Path, command: &str) -> Result<Value> {
     request_with_payload(workspace, command, Value::Null)
 }
 
+fn request_or_start(workspace: &Path, command: &str, payload: Value) -> Result<Value> {
+    match request_with_payload(workspace, command, payload.clone()) {
+        Ok(response) => Ok(response),
+        Err(first_error) => {
+            if lock_path(workspace).exists() {
+                bail!(
+                    "workspace {} is locked but the daemon did not answer: {first_error:#}",
+                    workspace.display()
+                );
+            }
+            ensure_daemon(workspace)?;
+            request_with_payload(workspace, command, payload)
+        }
+    }
+}
+
 fn request_with_payload(workspace: &Path, command: &str, payload: Value) -> Result<Value> {
     let state = read_state(workspace)?;
     let address: SocketAddr = state
@@ -1096,6 +1366,7 @@ fn request_with_payload(workspace: &Path, command: &str, payload: Value) -> Resu
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = json!({
         "version": PROTOCOL_VERSION,
+        "request_id": new_request_id(),
         "command": command,
         "token": state.get("token").and_then(Value::as_str).unwrap_or_default(),
         "payload": payload,
@@ -1311,6 +1582,15 @@ fn error_response(code: &str, message: &str) -> Value {
     })
 }
 
+fn attach_request_id(mut response: Value, request_id: Option<&Value>) -> Value {
+    if let Some(request_id) = request_id.and_then(Value::as_str) {
+        if let Some(object) = response.as_object_mut() {
+            object.insert("request_id".to_string(), Value::String(request_id.to_string()));
+        }
+    }
+    response
+}
+
 fn write_json(mut stream: TcpStream, value: &Value) -> Result<()> {
     writeln!(stream, "{}", serde_json::to_string(value)?)?;
     stream.flush()?;
@@ -1339,6 +1619,26 @@ fn state_path(workspace: &Path) -> PathBuf {
 
 fn log_path(workspace: &Path) -> PathBuf {
     workspace.join(LOG_FILE)
+}
+
+fn lock_path(workspace: &Path) -> PathBuf {
+    workspace.join(LOCK_FILE)
+}
+
+fn create_daemon_lock(workspace: &Path) -> Result<File> {
+    let lock_path = lock_path(workspace);
+    let mut lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "workspace {} is already locked by another daemon",
+                workspace.display()
+            )
+        })?;
+    writeln!(lock, "pid={}", process::id())?;
+    Ok(lock)
 }
 
 #[cfg(unix)]
@@ -1386,6 +1686,17 @@ fn write_state(workspace: &Path, state: &RuntimeState) -> Result<()> {
 }
 
 fn task_to_json(task: &TaskState) -> Value {
+    let now = task.completed_unix.unwrap_or_else(unix_now);
+    let elapsed_seconds = now.saturating_sub(task.started_unix);
+    let throughput_bytes_per_second = if elapsed_seconds > 0 {
+        Some(task.progress_bytes / elapsed_seconds)
+    } else {
+        None
+    };
+    let eta_seconds = match (throughput_bytes_per_second, task.total_bytes > task.progress_bytes) {
+        (Some(rate), true) if rate > 0 => Some((task.total_bytes - task.progress_bytes) / rate),
+        _ => None,
+    };
     let percent = if task.total_bytes > 0 {
         Some((task.progress_bytes as f64 / task.total_bytes as f64 * 100.0).min(100.0))
     } else {
@@ -1401,9 +1712,12 @@ fn task_to_json(task: &TaskState) -> Value {
         "progress_bytes": task.progress_bytes,
         "total_bytes": task.total_bytes,
         "percent": percent,
+        "throughput_bytes_per_second": throughput_bytes_per_second,
+        "eta_seconds": eta_seconds,
         "filesystems_found": task.filesystems_found,
         "started_unix": task.started_unix,
         "completed_unix": task.completed_unix,
+        "cancel_requested": task.cancel_requested,
         "error": task.error,
     })
 }
@@ -1433,6 +1747,10 @@ fn new_token() -> String {
     format!("{}-{nanos}", process::id())
 }
 
+fn new_request_id() -> String {
+    new_token()
+}
+
 struct RuntimeState {
     pid: u32,
     address: String,
@@ -1447,6 +1765,7 @@ struct RuntimeState {
     active_fs: Option<usize>,
     last_matches: Vec<SearchMatch>,
     selected_targets: Vec<SelectedTarget>,
+    cancel_flags: HashMap<u64, Arc<AtomicBool>>,
     active_session: Option<RecoverySession>,
 }
 
@@ -1463,6 +1782,7 @@ struct TaskState {
     filesystems_found: usize,
     started_unix: u64,
     completed_unix: Option<u64>,
+    cancel_requested: bool,
     error: Option<String>,
 }
 
@@ -1470,4 +1790,68 @@ struct TaskState {
 struct SelectedTarget {
     filesystem_index: usize,
     path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_daemon_path_cleans_relative_segments() {
+        assert_eq!(normalize_daemon_path(""), "/");
+        assert_eq!(normalize_daemon_path("/"), "/");
+        assert_eq!(normalize_daemon_path("foo/bar"), "/foo/bar");
+        assert_eq!(normalize_daemon_path("/foo/../bar/./baz"), "/bar/baz");
+    }
+
+    #[test]
+    fn parse_match_selector_is_one_based() {
+        assert_eq!(parse_match_selector("#1"), Some(0));
+        assert_eq!(parse_match_selector("#9"), Some(8));
+        assert_eq!(parse_match_selector("#0"), None);
+        assert_eq!(parse_match_selector("1"), None);
+        assert_eq!(parse_match_selector("#bad"), None);
+    }
+
+    #[test]
+    fn attach_request_id_preserves_response_shape() {
+        let response = attach_request_id(json!({ "ok": true }), Some(&json!("req-1")));
+        assert_eq!(response["ok"], json!(true));
+        assert_eq!(response["request_id"], json!("req-1"));
+    }
+
+    #[test]
+    fn task_json_includes_progress_metrics() {
+        let task = TaskState {
+            id: 7,
+            kind: "scan".to_string(),
+            status: "running".to_string(),
+            source: PathBuf::from("image.dd"),
+            output: PathBuf::from("scan.scn"),
+            phase: "Standard".to_string(),
+            progress_bytes: 50,
+            total_bytes: 100,
+            filesystems_found: 1,
+            started_unix: unix_now().saturating_sub(10),
+            completed_unix: None,
+            cancel_requested: false,
+            error: None,
+        };
+        let value = task_to_json(&task);
+        assert_eq!(value["id"], json!(7));
+        assert_eq!(value["percent"], json!(50.0));
+        assert!(value["throughput_bytes_per_second"].as_u64().is_some());
+    }
+
+    #[test]
+    fn daemon_lock_is_exclusive() {
+        let workspace = std::env::temp_dir().join(format!("recovermax-lock-test-{}", new_token()));
+        fs::create_dir_all(&workspace).unwrap();
+        let first = create_daemon_lock(&workspace).unwrap();
+        let second = create_daemon_lock(&workspace);
+        assert!(second.is_err());
+        drop(first);
+        let _ = fs::remove_file(lock_path(&workspace));
+        fs::remove_dir_all(&workspace).unwrap();
+    }
 }

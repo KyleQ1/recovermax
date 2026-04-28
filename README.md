@@ -118,6 +118,12 @@ Show recent daemon logs:
 recovermax daemon logs --workspace case1 --tail 50
 ```
 
+Cancel a running daemon task:
+
+```bash
+recovermax daemon cancel --workspace case1 --task 1 --json
+```
+
 Start a daemon-backed scan:
 
 ```bash
@@ -137,6 +143,8 @@ List filesystems from the daemon-held session:
 ```bash
 recovermax filesystems --workspace case1 --json
 recovermax ls / --workspace case1 --json
+recovermax tree / --workspace case1 --json
+recovermax stat /path/to/file --workspace case1 --json
 ```
 
 Search and select results across separate CLI calls:

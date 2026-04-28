@@ -166,7 +166,7 @@ pub enum Command {
     /// Print a tree view of a browsable session
     Tree {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Path within the filesystem session
         #[arg(default_value = "/")]
@@ -187,15 +187,23 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show metadata for a path or session node
     Stat {
         /// Path to disk image or block device
-        image: PathBuf,
+        image: Option<PathBuf>,
 
         /// Path or numeric node id
-        target: String,
+        target: Option<String>,
 
         /// Load a previous scan/session file instead of re-scanning
         #[arg(short, long)]
@@ -208,6 +216,14 @@ pub enum Command {
         /// Memory budget for RecoverMax-managed caches
         #[arg(long)]
         memory_budget: Option<String>,
+
+        /// Workspace directory for daemon-backed session state
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Print machine-readable JSON for daemon-backed output
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show traversal warnings for degraded or partial sessions
@@ -556,7 +572,23 @@ pub fn run(args: Args) -> Result<()> {
             fs,
             depth,
             memory_budget,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                let path = if let Some(image_arg) = image.as_ref() {
+                    if path == "/" {
+                        image_arg.to_string_lossy().into_owned()
+                    } else {
+                        path
+                    }
+                } else {
+                    path
+                };
+                return crate::daemon::submit_tree(&workspace, &path, fs, depth, json);
+            }
+            let image =
+                image.ok_or_else(|| anyhow!("tree requires <image> unless --workspace is supplied"))?;
             if let Some(ref sf) = scan_file {
                 if is_binary_scn(sf) {
                     let bs = BinarySession::open(&image, sf)?;
@@ -584,7 +616,20 @@ pub fn run(args: Args) -> Result<()> {
             scan_file,
             fs,
             memory_budget,
+            workspace,
+            json,
         } => {
+            if let Some(workspace) = workspace {
+                let target = if let Some(image_arg) = image.as_ref() {
+                    target.unwrap_or_else(|| image_arg.to_string_lossy().into_owned())
+                } else {
+                    target.unwrap_or_else(|| "/".to_string())
+                };
+                return crate::daemon::submit_stat(&workspace, &target, fs, json);
+            }
+            let image =
+                image.ok_or_else(|| anyhow!("stat requires <image> unless --workspace is supplied"))?;
+            let target = target.ok_or_else(|| anyhow!("stat requires <target>"))?;
             if let Some(ref sf) = scan_file {
                 if is_binary_scn(sf) {
                     let bs = BinarySession::open(&image, sf)?;
