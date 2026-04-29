@@ -477,6 +477,40 @@ fn decode_data_runs_two_byte_length() {
     assert_eq!(runs[0].cluster_offset, 10);
 }
 
+#[test]
+fn decode_data_runs_rejects_oversized_length_field() {
+    let data = [
+        0x0F, // 15-byte length field, impossible to fit in u64
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+    ];
+    let result = ntfs::decode_data_runs(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn decode_data_runs_rejects_oversized_offset_field() {
+    let data = [
+        0xF1, // 1-byte length, 15-byte offset delta
+        1,
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+    ];
+    let result = ntfs::decode_data_runs(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn decode_data_runs_truncated_run_fails_closed() {
+    let data = [
+        0x22, // needs 2 bytes length + 2 bytes offset
+        1,
+        0,
+    ];
+    let runs = ntfs::decode_data_runs(&data).unwrap();
+    assert!(runs.is_empty());
+}
+
 // --- MFT entry parsing ---
 
 #[test]
@@ -557,6 +591,14 @@ fn parse_mft_entry_with_resident_data() {
     for i in 0..16 {
         assert_eq!(data[i], i as u8);
     }
+}
+
+#[test]
+fn parse_mft_entry_bad_nonresident_run_errors() {
+    let data_runs = [0x0F, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let entry = build_mft_entry(32, 0x01, "bad-run.bin", 5, 4096, &data_runs);
+    let result = ntfs::parse_mft_entry(&entry, 32);
+    assert!(result.is_err());
 }
 
 // --- NtfsFs integration ---
@@ -731,6 +773,27 @@ fn ntfs_fs_read_file_nonresident() {
 
     assert_eq!(data.len(), file_content.len());
     assert_eq!(&data, file_content);
+}
+
+#[test]
+fn ntfs_fs_read_file_nonresident_out_of_range_errors() {
+    let mft_cluster: u64 = 100;
+    let mut img = build_ntfs_boot_sector(512, 8, 2097152, mft_cluster);
+    let cluster_size = 4096;
+    let mft_offset = mft_cluster as usize * cluster_size;
+
+    // Points far beyond the synthetic image. The parser can decode it, but
+    // recovery must return a clean read error instead of producing bogus bytes.
+    let data_runs = [0x31, 0x01, 0xFF, 0xFF, 0x7F, 0x00];
+    let entry = build_mft_entry(0, 0x01, "outside.bin", 5, 4096, &data_runs);
+    img[mft_offset..mft_offset + MFT_ENTRY_SIZE].copy_from_slice(&entry);
+
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = ntfs::NtfsFs::new(&reader, 0).unwrap();
+    let result = fs.read_file(0);
+
+    assert!(result.is_err());
 }
 
 // --- Unicode filename ---

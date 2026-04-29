@@ -184,6 +184,13 @@ pub fn decode_data_runs(data: &[u8]) -> Result<Vec<DataRun>> {
         let length_size = (header & 0x0F) as usize;
         let offset_size = ((header >> 4) & 0x0F) as usize;
 
+        if length_size > 8 || offset_size > 8 {
+            anyhow::bail!(
+                "Invalid NTFS data run field sizes: length={} offset={}",
+                length_size,
+                offset_size
+            );
+        }
         if length_size == 0 || pos + 1 + length_size + offset_size > data.len() {
             break;
         }

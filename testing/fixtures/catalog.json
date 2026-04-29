@@ -71,6 +71,16 @@
       "automation": ["cargo-test"]
     },
     {
+      "id": "ntfs-malformed-data-runs-unit",
+      "category": "parser-unit",
+      "priority": "P0",
+      "status": "unit-covered",
+      "filesystems": ["ntfs"],
+      "source_types": ["synthetic-bytes"],
+      "validates": ["oversized-run-length-rejected", "oversized-run-offset-rejected", "truncated-run-fail-closed", "out-of-range-run-read-error"],
+      "automation": ["cargo-test"]
+    },
+    {
       "id": "ntfs-public-fragmented-deleted",
       "category": "filesystem-public-corpus",
       "priority": "P0",
