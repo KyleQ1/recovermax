@@ -26,7 +26,7 @@ jobs:
   verify-bot-commits-are-signatures-only:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Need the previous commit to diff against.
           fetch-depth: 2
