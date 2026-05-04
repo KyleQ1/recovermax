@@ -61,6 +61,16 @@
       "automation": ["cargo-test"]
     },
     {
+      "id": "ext4-malformed-extent-unit",
+      "category": "parser-unit",
+      "priority": "P0",
+      "status": "unit-covered",
+      "filesystems": ["ext4"],
+      "source_types": ["synthetic-bytes"],
+      "validates": ["overdeclared-extent-bounded-read", "out-of-range-extent-error", "streaming-extent-error"],
+      "automation": ["cargo-test"]
+    },
+    {
       "id": "ntfs-unit-parser-basics",
       "category": "parser-unit",
       "priority": "P0",

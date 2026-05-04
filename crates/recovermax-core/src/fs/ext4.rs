@@ -490,18 +490,23 @@ impl<'a> Ext4Fs<'a> {
     }
 
     fn read_extent_data(&self, inode: &Inode) -> Result<Vec<u8>> {
-        let cap = (inode.size).min(self.reader.len()) as usize;
-        let mut result = Vec::with_capacity(cap);
+        let target_size = (inode.size).min(self.reader.len()) as usize;
+        let mut result = Vec::with_capacity(target_size);
         let extents = self.parse_extent_tree(&inode.block_data)?;
 
         for extent in &extents {
+            if result.len() >= target_size || extent.block_count == 0 {
+                break;
+            }
             let offset = self.block_offset(extent.start_block);
-            let len = extent.block_count as u64 * self.superblock.block_size() as u64;
-            let data = self.reader.read_at(offset, len as usize)?;
+            let extent_len = extent.block_count as u64 * self.superblock.block_size() as u64;
+            let remaining = target_size - result.len();
+            let len = (extent_len as usize).min(remaining);
+            let data = self.reader.read_at_exact(offset, len)?;
             result.extend_from_slice(data);
         }
 
-        result.truncate(inode.size as usize);
+        result.truncate(target_size);
         Ok(result)
     }
 
@@ -510,12 +515,14 @@ impl<'a> Ext4Fs<'a> {
         let extents = self.parse_extent_tree(&inode.block_data)?;
 
         for extent in &extents {
-            if result.len() >= max_bytes {
+            if result.len() >= max_bytes || extent.block_count == 0 {
                 break;
             }
             let offset = self.block_offset(extent.start_block);
-            let len = extent.block_count as u64 * self.superblock.block_size() as u64;
-            let data = self.reader.read_at(offset, len as usize)?;
+            let extent_len = extent.block_count as u64 * self.superblock.block_size() as u64;
+            let remaining = max_bytes - result.len();
+            let len = (extent_len as usize).min(remaining);
+            let data = self.reader.read_at_exact(offset, len)?;
             result.extend_from_slice(data);
         }
 
@@ -752,16 +759,16 @@ impl<'a> Ext4Fs<'a> {
         let extents = self.parse_extent_tree(&inode.block_data)?;
 
         for extent in &extents {
-            if written >= target_size {
+            if written >= target_size || extent.block_count == 0 {
                 break;
             }
             let offset = self.block_offset(extent.start_block);
-            let len = extent.block_count as u64 * self.superblock.block_size() as u64;
-            let data = self.reader.read_at(offset, len as usize)?;
+            let extent_len = extent.block_count as u64 * self.superblock.block_size() as u64;
+            let len = extent_len.min(target_size - written) as usize;
+            let data = self.reader.read_at_exact(offset, len)?;
 
-            let to_write = (target_size - written).min(data.len() as u64) as usize;
-            writer.write_all(&data[..to_write])?;
-            written += to_write as u64;
+            writer.write_all(data)?;
+            written += data.len() as u64;
         }
 
         Ok(written)

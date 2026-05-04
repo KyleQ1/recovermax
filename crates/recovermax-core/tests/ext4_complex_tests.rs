@@ -274,6 +274,51 @@ fn read_file_data_via_extent() {
     assert_eq!(&data, b"Hello, world!");
 }
 
+#[test]
+fn read_file_extent_overdeclared_block_count_only_reads_logical_size() {
+    let mut builder = Ext4ImageBuilder::new(32);
+    builder.write_superblock("overextent");
+    builder.write_block_group_descriptor(0, 3);
+
+    let content = b"short logical file";
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, content.len() as u64, 20, 99);
+    builder.write_data(20, content);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let inode = fs.read_inode(11).unwrap();
+    let data = fs.read_inode_data(&inode).unwrap();
+    assert_eq!(&data, content);
+
+    let mut streamed = Vec::new();
+    let written = fs.stream_inode_data(&inode, &mut streamed).unwrap();
+    assert_eq!(written, content.len() as u64);
+    assert_eq!(&streamed, content);
+}
+
+#[test]
+fn read_file_extent_outside_image_errors() {
+    let mut builder = Ext4ImageBuilder::new(32);
+    builder.write_superblock("badextent");
+    builder.write_block_group_descriptor(0, 3);
+    builder.write_inode_with_extent(11, 0x8000 | 0o644, 4096, 9999, 1);
+
+    let img = builder.build();
+    let f = create_test_image(&img);
+    let reader = ImageReader::open(f.path()).unwrap();
+    let fs = Ext4Fs::new(&reader, 0).unwrap();
+
+    let inode = fs.read_inode(11).unwrap();
+    assert!(fs.read_inode_data(&inode).is_err());
+
+    let mut streamed = Vec::new();
+    assert!(fs.stream_inode_data(&inode, &mut streamed).is_err());
+    assert!(streamed.is_empty());
+}
+
 // ===========================================================================
 // END-TO-END: read file data via block map (no extents)
 // ===========================================================================
