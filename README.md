@@ -4,7 +4,7 @@ High-performance data recovery tool for ext4 and NTFS disk images, written in Ru
 
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021_edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-172_passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-quality_suite-brightgreen.svg)](#testing)
 
 ## What It Does
 
@@ -87,6 +87,22 @@ The binary will be at `target/release/recovermax`.
 ### Daemon foundation
 
 RecoverMax supports a daemon-backed workflow so long scans can keep running after the foreground CLI command exits. The daemon owns the active recovery session, keeps it hot in memory for fast follow-up commands, and checkpoints scan metadata to the workspace.
+
+Recommended automation shape:
+
+```bash
+recovermax scan image.dd --workspace case1 --json
+recovermax daemon status --workspace case1 --json
+recovermax filesystems --workspace case1 --json
+recovermax ls / --workspace case1 --json
+recovermax search File --workspace case1 --json
+recovermax select '#2' --workspace case1 --json
+recovermax recover selected --dest out --workspace case1 --json
+recovermax daemon release --workspace case1 --json
+recovermax daemon stop --workspace case1 --json
+```
+
+For LLM agents and scripts, prefer daemon-backed commands with `--json`. Responses use a stable top-level shape with `ok`, `version`, `state`, `workspace`, task/session fields, and `next_actions` where useful.
 
 Start a daemon for a workspace:
 
@@ -198,9 +214,9 @@ recovermax hexdump <image> -o 0x400 -l 256           # inspect raw bytes
 ## Building from Source
 
 ```bash
-cargo build              # debug build
-cargo build --release    # optimized build
-cargo test               # run all 172 tests
+cargo build                    # debug build
+cargo build --release          # optimized build
+scripts/run-quality-suite.sh   # core, CLI, and fixture scorecard
 ```
 
 ## Testing

@@ -1043,7 +1043,7 @@ fn selection_value(workspace: &Path, state: &RuntimeState) -> Value {
         "selection": selection,
         "count": count,
         "next_actions": [
-            "recovermax recover selected --dest <dir> --workspace <workspace>"
+            "recovermax recover selected --dest <dir> --workspace <workspace> --json"
         ],
     })
 }
@@ -1577,8 +1577,13 @@ fn error_response(code: &str, message: &str) -> Value {
     json!({
         "ok": false,
         "version": PROTOCOL_VERSION,
+        "state": "error",
         "error": code,
         "message": message,
+        "next_actions": [
+            "recovermax daemon status --workspace <workspace> --json",
+            "recovermax daemon logs --workspace <workspace> --tail 50"
+        ],
     })
 }
 
@@ -1796,6 +1801,50 @@ struct SelectedTarget {
 mod tests {
     use super::*;
 
+    fn assert_standard_contract(value: &Value) {
+        assert!(value.get("ok").and_then(Value::as_bool).is_some());
+        assert_eq!(value["version"], json!(PROTOCOL_VERSION));
+        assert!(value.get("state").and_then(Value::as_str).is_some());
+        assert!(value.get("next_actions").and_then(Value::as_array).is_some());
+    }
+
+    fn test_runtime_state() -> RuntimeState {
+        RuntimeState {
+            pid: 1234,
+            address: "127.0.0.1:9999".to_string(),
+            token: "test-token".to_string(),
+            started_unix: 1_700_000_000,
+            released: false,
+            stopping: false,
+            next_task_id: 2,
+            tasks: vec![TaskState {
+                id: 1,
+                kind: "scan".to_string(),
+                status: "completed".to_string(),
+                source: PathBuf::from("image.dd"),
+                output: PathBuf::from("scan.scn"),
+                phase: "complete".to_string(),
+                progress_bytes: 100,
+                total_bytes: 100,
+                filesystems_found: 1,
+                started_unix: 1_700_000_001,
+                completed_unix: Some(1_700_000_002),
+                cancel_requested: false,
+                error: None,
+            }],
+            active_image: Some(PathBuf::from("image.dd")),
+            active_scan: Some(PathBuf::from("scan.scn")),
+            active_fs: Some(0),
+            last_matches: Vec::new(),
+            selected_targets: vec![SelectedTarget {
+                filesystem_index: 0,
+                path: "/hello.txt".to_string(),
+            }],
+            cancel_flags: HashMap::new(),
+            active_session: None,
+        }
+    }
+
     #[test]
     fn normalize_daemon_path_cleans_relative_segments() {
         assert_eq!(normalize_daemon_path(""), "/");
@@ -1818,6 +1867,72 @@ mod tests {
         let response = attach_request_id(json!({ "ok": true }), Some(&json!("req-1")));
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["request_id"], json!("req-1"));
+    }
+
+    #[test]
+    fn error_response_has_llm_contract() {
+        let value = error_response("bad_selector", "selector is invalid");
+
+        assert_standard_contract(&value);
+        assert_eq!(value["ok"], json!(false));
+        assert_eq!(value["state"], json!("error"));
+        assert_eq!(value["error"], json!("bad_selector"));
+        assert_eq!(value["message"], json!("selector is invalid"));
+        assert!(!value["next_actions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_response_has_llm_contract() {
+        let workspace = Path::new("/tmp/recovermax-contract");
+        let state = test_runtime_state();
+        let value = status_response(workspace, &state, true);
+
+        assert_standard_contract(&value);
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["state"], json!("online"));
+        assert_eq!(value["workspace"], json!(workspace));
+        assert_eq!(value["pid"], json!(1234));
+        assert_eq!(value["active_fs"], json!(0));
+        assert_eq!(value["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(value["selection"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn offline_status_has_llm_contract_without_state_file() {
+        let workspace = std::env::temp_dir().join(format!(
+            "recovermax-offline-contract-{}",
+            new_token()
+        ));
+        fs::create_dir_all(&workspace).unwrap();
+
+        let value = offline_status(&workspace, anyhow!("connection refused"));
+
+        assert_standard_contract(&value);
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["state"], json!("offline"));
+        assert_eq!(value["workspace"], json!(workspace));
+        assert!(value["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection refused"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn selection_value_has_llm_contract_and_json_next_action() {
+        let workspace = Path::new("/tmp/recovermax-contract");
+        let state = test_runtime_state();
+        let value = selection_value(workspace, &state);
+
+        assert_standard_contract(&value);
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["count"], json!(1));
+        assert_eq!(value["selection"][0]["path"], json!("/hello.txt"));
+        assert!(value["next_actions"][0]
+            .as_str()
+            .unwrap()
+            .contains("--json"));
     }
 
     #[test]
