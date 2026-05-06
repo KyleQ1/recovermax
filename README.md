@@ -224,12 +224,15 @@ scripts/run-quality-suite.sh   # core, CLI, and fixture scorecard
 Tests build filesystem images entirely in-memory -- no disk images, no root access, no Linux required. Runs on any platform.
 
 ```bash
-cargo test                       # all tests
+scripts/run-quality-suite.sh     # core, CLI, manifests, daemon workflow
+cargo test                       # all Rust tests
 cargo test --test ext4_tests     # ext4 parsing
 cargo test --test ntfs_tests     # NTFS parsing
 cargo test --test carve_tests    # file carving
 cargo test --test scan_tests     # partition detection
 ```
+
+The CLI package includes real-binary daemon tests that scan a synthetic ext4 image, browse/search it through a workspace, select a result, and recover it.
 
 For the broader validation workflow, dataset inventory, and manifest conventions, see [testing/README.md](/Users/kylequinlan/Workspace/recovermax/testing/README.md).
 For a concrete malformed-image case study, see [testing/datasets/cfreds-dfr-01-ext/notes.md](/Users/kylequinlan/Workspace/recovermax/testing/datasets/cfreds-dfr-01-ext/notes.md).

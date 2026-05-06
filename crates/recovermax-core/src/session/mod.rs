@@ -1166,7 +1166,9 @@ fn stream_inode_table_scan(
 
     // ── Pass 1: find valid inodes + read directory entries for names ──
     let mut seen = vec![0u8; total_inodes / 8 + 1];
-    let mut dir_inodes: Vec<u64> = Vec::new();
+    // Inode-table streaming skips reserved inodes, but root (inode 2) is the
+    // directory that gives top-level entries their real parent/name.
+    let mut dir_inodes: Vec<u64> = vec![2];
     let mut pass1_count = 0usize;
 
     for group in 0..num_groups {
