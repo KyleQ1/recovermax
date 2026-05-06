@@ -209,6 +209,17 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
         "root listing should include hello.txt: {ls:#}"
     );
 
+    let tree = run_json(&["tree", "/", "--workspace", &workspace_text, "--json"]);
+    assert_contract(&tree, &canonical_workspace);
+    assert!(
+        tree["entries"]
+            .as_array()
+            .expect("tree entries should be an array")
+            .iter()
+            .any(|entry| entry["node"]["path"] == json!("/hello.txt")),
+        "tree should include hello.txt: {tree:#}"
+    );
+
     let stat = run_json(&[
         "stat",
         "/hello.txt",
@@ -241,6 +252,16 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
     assert_contract(&selected, &canonical_workspace);
     assert_eq!(selected["count"], json!(1));
 
+    let selection = run_json(&[
+        "selection",
+        "--workspace",
+        &workspace_text,
+        "--json",
+    ]);
+    assert_contract(&selection, &canonical_workspace);
+    assert_eq!(selection["count"], json!(1));
+    assert_eq!(selection["selection"][0]["path"], json!("/hello.txt"));
+
     let dest = workspace.path.join("recovered");
     let dest_text = dest.display().to_string();
     let recovered = run_json(&[
@@ -252,10 +273,8 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
         &workspace_text,
         "--json",
     ]);
-    assert_eq!(recovered["ok"], json!(true));
-    assert_eq!(recovered["version"], json!(1));
+    assert_contract(&recovered, &canonical_workspace);
     assert_eq!(recovered["state"], json!("online"));
-    assert_eq!(recovered["workspace"], json!(canonical_workspace));
     assert_eq!(recovered["count"], json!(1));
     let recovered_file = dest.join("hello.txt");
     let content = std::fs::read_to_string(&recovered_file)

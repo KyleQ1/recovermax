@@ -934,6 +934,10 @@ fn recover_response(
         "dest": dest,
         "recovered": recovered,
         "count": count,
+        "next_actions": [
+            "recovermax daemon status --workspace <workspace> --json",
+            "recovermax daemon logs --workspace <workspace> --tail 50"
+        ],
     }))
 }
 
