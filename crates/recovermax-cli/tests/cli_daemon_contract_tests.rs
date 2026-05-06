@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TestWorkspace {
     path: PathBuf,
@@ -46,9 +49,10 @@ fn unique_workspace() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_nanos();
+    let sequence = WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "recovermax-cli-daemon-contract-{}-{nanos}",
-        std::process::id()
+        "recovermax-cli-daemon-contract-{}-{nanos}-{sequence}",
+        std::process::id(),
     ))
 }
 
@@ -121,6 +125,17 @@ fn wait_for_task(workspace: &TestWorkspace, task_id: u64) -> Value {
         }
     }
     panic!("task {task_id} did not complete before timeout");
+}
+
+fn wait_for_daemon_lock_release(workspace: &TestWorkspace) {
+    let lock_path = workspace.path.join("daemon.lock");
+    for _ in 0..100 {
+        if !lock_path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("daemon lock was not released for {}", workspace.path.display());
 }
 
 #[test]
@@ -284,6 +299,57 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
     let content = std::fs::read_to_string(&recovered_file)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", recovered_file.display()));
     assert_eq!(content, "RecoverMax says hi");
+}
+
+#[test]
+fn daemon_restart_reloads_completed_scan_without_rescanning() {
+    let workspace = TestWorkspace::new();
+    let workspace_text = workspace.arg();
+    let canonical_workspace = workspace.canonical();
+    let image_path = workspace.path.join("synthetic-ext4.img");
+    std::fs::write(&image_path, build_synthetic_ext4_image())
+        .expect("failed to write synthetic ext4 image");
+    let image_text = image_path.display().to_string();
+
+    let scan = run_json(&[
+        "scan",
+        &image_text,
+        "--workspace",
+        &workspace_text,
+        "--json",
+    ]);
+    let task_id = scan["task_id"]
+        .as_u64()
+        .expect("scan should return task id");
+    wait_for_task(&workspace, task_id);
+
+    let stop = run_json(&["daemon", "stop", "--workspace", &workspace_text, "--json"]);
+    assert_contract(&stop, &canonical_workspace);
+    assert_eq!(stop["state"], json!("stopping"));
+    wait_for_daemon_lock_release(&workspace);
+
+    let start = run_json(&["daemon", "start", "--workspace", &workspace_text, "--json"]);
+    assert_contract(&start, &canonical_workspace);
+    assert_eq!(start["state"], json!("online"));
+    assert_eq!(start["has_active_session"], json!(false));
+    assert_eq!(start["active_image"], json!(image_path));
+    assert_eq!(start["active_scan"], json!(canonical_workspace.join("scan.scn")));
+
+    let filesystems = run_json(&["filesystems", "--workspace", &workspace_text, "--json"]);
+    assert_contract(&filesystems, &canonical_workspace);
+    assert_eq!(filesystems["count"], json!(1));
+    assert_eq!(filesystems["filesystems"][0]["label"], json!("cli-smoke"));
+
+    let ls = run_json(&["ls", "/", "--workspace", &workspace_text, "--json"]);
+    assert_contract(&ls, &canonical_workspace);
+    assert!(
+        ls["entries"]
+            .as_array()
+            .expect("ls entries should be an array")
+            .iter()
+            .any(|entry| entry["path"] == json!("/hello.txt")),
+        "root listing should include hello.txt after restart: {ls:#}"
+    );
 }
 
 fn build_synthetic_ext4_image() -> Vec<u8> {

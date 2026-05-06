@@ -304,12 +304,6 @@ fn ensure_daemon(workspace: &Path) -> Result<()> {
             workspace.display()
         );
     }
-    let state_path = state_path(&workspace);
-    if state_path.exists() {
-        fs::remove_file(&state_path)
-            .with_context(|| format!("failed to remove stale {}", state_path.display()))?;
-    }
-
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let stderr = OpenOptions::new()
         .create(true)
@@ -392,28 +386,16 @@ fn print_logs(workspace: &Path, tail: usize) -> Result<()> {
 fn run_daemon(workspace: &Path) -> Result<()> {
     let workspace = prepare_workspace(workspace)?;
     let _lock = create_daemon_lock(&workspace)?;
+    let checkpoint = read_state(&workspace).ok();
     let listener =
         TcpListener::bind("127.0.0.1:0").context("failed to bind daemon control port")?;
     let address = listener
         .local_addr()
         .context("failed to read daemon control address")?;
-    let state = Arc::new(Mutex::new(RuntimeState {
-        pid: process::id(),
-        address: address.to_string(),
-        token: new_token(),
-        started_unix: unix_now(),
-        released: false,
-        stopping: false,
-        next_task_id: 1,
-        tasks: Vec::new(),
-        active_image: None,
-        active_scan: None,
-        active_fs: Some(0),
-        last_matches: Vec::new(),
-        selected_targets: Vec::new(),
-        cancel_flags: HashMap::new(),
-        active_session: None,
-    }));
+    let state = Arc::new(Mutex::new(RuntimeState::from_checkpoint(
+        checkpoint,
+        address.to_string(),
+    )));
 
     write_state(&workspace, &state.lock().expect("daemon state poisoned"))?;
     let (pid, address) = {
@@ -1807,6 +1789,69 @@ struct RuntimeState {
     active_session: Option<RecoverySession>,
 }
 
+impl RuntimeState {
+    fn from_checkpoint(checkpoint: Option<Value>, address: String) -> Self {
+        let tasks = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("tasks"))
+            .and_then(Value::as_array)
+            .map(|tasks| tasks.iter().filter_map(TaskState::from_json).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let next_task_id = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("next_task_id"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1);
+        let active_image = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("active_image"))
+            .and_then(pathbuf_from_json);
+        let active_scan = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("active_scan"))
+            .and_then(pathbuf_from_json);
+        let active_fs = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("active_fs"))
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .or(Some(0));
+        let selected_targets = checkpoint
+            .as_ref()
+            .and_then(|value| value.get("selection"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(SelectedTarget::from_json)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Self {
+            pid: process::id(),
+            address,
+            token: new_token(),
+            started_unix: unix_now(),
+            released: checkpoint
+                .as_ref()
+                .and_then(|value| value.get("released"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            stopping: false,
+            next_task_id,
+            tasks,
+            active_image,
+            active_scan,
+            active_fs,
+            last_matches: Vec::new(),
+            selected_targets,
+            cancel_flags: HashMap::new(),
+            active_session: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TaskState {
     id: u64,
@@ -1824,10 +1869,83 @@ struct TaskState {
     error: Option<String>,
 }
 
+impl TaskState {
+    fn from_json(value: &Value) -> Option<Self> {
+        let status = value.get("status")?.as_str()?.to_string();
+        let phase = value
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or(status.as_str())
+            .to_string();
+        let resurrected_status = match status.as_str() {
+            "queued" | "running" => "interrupted".to_string(),
+            _ => status,
+        };
+        let resurrected_phase = match phase.as_str() {
+            "queued" | "running" => "interrupted".to_string(),
+            _ => phase,
+        };
+        Some(Self {
+            id: value.get("id")?.as_u64()?,
+            kind: value
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("task")
+                .to_string(),
+            status: resurrected_status,
+            source: value
+                .get("source")
+                .and_then(pathbuf_from_json)
+                .unwrap_or_default(),
+            output: value
+                .get("output")
+                .and_then(pathbuf_from_json)
+                .unwrap_or_default(),
+            phase: resurrected_phase,
+            progress_bytes: value
+                .get("progress_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            total_bytes: value
+                .get("total_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            filesystems_found: value
+                .get("filesystems_found")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(0),
+            started_unix: value
+                .get("started_unix")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(unix_now),
+            completed_unix: value.get("completed_unix").and_then(Value::as_u64),
+            cancel_requested: false,
+            error: value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 struct SelectedTarget {
     filesystem_index: usize,
     path: String,
+}
+
+impl SelectedTarget {
+    fn from_json(value: &Value) -> Option<Self> {
+        Some(Self {
+            filesystem_index: value.get("filesystem_index")?.as_u64()? as usize,
+            path: value.get("path")?.as_str()?.to_string(),
+        })
+    }
+}
+
+fn pathbuf_from_json(value: &Value) -> Option<PathBuf> {
+    value.as_str().map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -1896,6 +2014,55 @@ mod tests {
         assert_eq!(parse_match_selector("#0"), None);
         assert_eq!(parse_match_selector("1"), None);
         assert_eq!(parse_match_selector("#bad"), None);
+    }
+
+    #[test]
+    fn runtime_state_rehydrates_workspace_checkpoint() {
+        let checkpoint = json!({
+            "released": false,
+            "next_task_id": 9,
+            "active_image": "/case/image.dd",
+            "active_scan": "/case/scan.scn",
+            "active_fs": 2,
+            "selection": [
+                {
+                    "index": 1,
+                    "filesystem_index": 2,
+                    "path": "/hello.txt"
+                }
+            ],
+            "tasks": [
+                {
+                    "id": 7,
+                    "kind": "scan",
+                    "status": "running",
+                    "source": "/case/image.dd",
+                    "output": "/case/scan.scn",
+                    "phase": "detecting",
+                    "progress_bytes": 42,
+                    "total_bytes": 100,
+                    "filesystems_found": 1,
+                    "started_unix": 1700000000,
+                    "completed_unix": null,
+                    "cancel_requested": false,
+                    "error": null
+                }
+            ]
+        });
+
+        let state = RuntimeState::from_checkpoint(Some(checkpoint), "127.0.0.1:9999".to_string());
+
+        assert_eq!(state.address, "127.0.0.1:9999");
+        assert_eq!(state.active_image, Some(PathBuf::from("/case/image.dd")));
+        assert_eq!(state.active_scan, Some(PathBuf::from("/case/scan.scn")));
+        assert_eq!(state.active_fs, Some(2));
+        assert_eq!(state.next_task_id, 9);
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.tasks[0].status, "interrupted");
+        assert_eq!(state.tasks[0].phase, "detecting");
+        assert_eq!(state.selected_targets.len(), 1);
+        assert_eq!(state.selected_targets[0].path, "/hello.txt");
+        assert!(state.active_session.is_none());
     }
 
     #[test]

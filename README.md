@@ -152,7 +152,7 @@ The command submits a background task and returns. Use status to watch progress:
 recovermax daemon status --workspace case1 --json
 ```
 
-When complete, the daemon saves `case1/scan.scn` and keeps the loaded session in memory until `daemon release` or `daemon stop`.
+When complete, the daemon saves `case1/scan.scn` and keeps the loaded session in memory until `daemon release` or `daemon stop`. If the daemon is restarted later, workspace metadata points back to the saved `.scn` and browse/search commands reload it without a full rescan.
 
 List filesystems from the daemon-held session:
 
