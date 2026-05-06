@@ -29,13 +29,7 @@ impl TestWorkspace {
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
         let workspace_text = workspace_arg(&self.path);
-        let _ = run_recovermax(&[
-            "daemon",
-            "stop",
-            "--workspace",
-            &workspace_text,
-            "--json",
-        ]);
+        let _ = run_recovermax(&["daemon", "stop", "--workspace", &workspace_text, "--json"]);
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
@@ -86,23 +80,33 @@ fn workspace_arg(workspace: &Path) -> String {
 }
 
 fn assert_contract(value: &Value, workspace: &Path) {
-    assert_eq!(value["ok"], json!(true));
-    assert_eq!(value["version"], json!(1));
+    assert_eq!(value["ok"], json!(true), "{value:#}");
+    assert_eq!(value["version"], json!(1), "{value:#}");
     assert!(value.get("state").and_then(Value::as_str).is_some());
     assert_eq!(value["workspace"], json!(workspace));
-    assert!(value.get("next_actions").and_then(Value::as_array).is_some());
+    assert!(value
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some());
+}
+
+fn assert_error_contract(value: &Value, workspace: &Path, code: &str) {
+    assert_eq!(value["ok"], json!(false));
+    assert_eq!(value["version"], json!(1));
+    assert_eq!(value["state"], json!("error"));
+    assert_eq!(value["workspace"], json!(workspace));
+    assert_eq!(value["error"], json!(code));
+    assert!(value.get("message").and_then(Value::as_str).is_some());
+    assert!(value
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some());
 }
 
 fn wait_for_task(workspace: &TestWorkspace, task_id: u64) -> Value {
     let workspace_text = workspace.arg();
     for _ in 0..100 {
-        let status = run_json(&[
-            "daemon",
-            "status",
-            "--workspace",
-            &workspace_text,
-            "--json",
-        ]);
+        let status = run_json(&["daemon", "status", "--workspace", &workspace_text, "--json"]);
         let task = status["tasks"]
             .as_array()
             .expect("status tasks should be an array")
@@ -120,42 +124,62 @@ fn wait_for_task(workspace: &TestWorkspace, task_id: u64) -> Value {
 }
 
 #[test]
+fn daemon_workspace_failures_emit_stable_json_contract() {
+    let workspace = TestWorkspace::new();
+    let workspace_text = workspace.arg();
+    let canonical_workspace = workspace.canonical();
+
+    let filesystems = run_json(&["filesystems", "--workspace", &workspace_text, "--json"]);
+    assert_error_contract(&filesystems, &canonical_workspace, "no_active_session");
+
+    let bad_selector = run_json(&["select", "#1", "--workspace", &workspace_text, "--json"]);
+    assert_error_contract(&bad_selector, &canonical_workspace, "selector_out_of_range");
+
+    let image_path = workspace.path.join("synthetic-ext4.img");
+    std::fs::write(&image_path, build_synthetic_ext4_image())
+        .expect("failed to write synthetic ext4 image");
+    let image_text = image_path.display().to_string();
+    let scan = run_json(&[
+        "scan",
+        &image_text,
+        "--workspace",
+        &workspace_text,
+        "--json",
+    ]);
+    let task_id = scan["task_id"]
+        .as_u64()
+        .expect("scan should return task id");
+    wait_for_task(&workspace, task_id);
+
+    let missing_path = run_json(&[
+        "stat",
+        "/missing.txt",
+        "--workspace",
+        &workspace_text,
+        "--json",
+    ]);
+    assert_error_contract(&missing_path, &canonical_workspace, "daemon_error");
+}
+
+#[test]
 fn daemon_start_status_stop_emit_stable_json_contract() {
     let workspace = TestWorkspace::new();
     let workspace_text = workspace.arg();
     let canonical_workspace = workspace.canonical();
 
-    let start = run_json(&[
-        "daemon",
-        "start",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let start = run_json(&["daemon", "start", "--workspace", &workspace_text, "--json"]);
     assert_contract(&start, &canonical_workspace);
     assert_eq!(start["state"], json!("online"));
     assert!(start["pid"].as_u64().is_some());
     assert!(start["address"].as_str().unwrap().starts_with("127.0.0.1:"));
 
-    let status = run_json(&[
-        "daemon",
-        "status",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let status = run_json(&["daemon", "status", "--workspace", &workspace_text, "--json"]);
     assert_contract(&status, &canonical_workspace);
     assert_eq!(status["state"], json!("online"));
     assert!(status["tasks"].as_array().unwrap().is_empty());
     assert!(status["selection"].as_array().unwrap().is_empty());
 
-    let stop = run_json(&[
-        "daemon",
-        "stop",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let stop = run_json(&["daemon", "stop", "--workspace", &workspace_text, "--json"]);
     assert_contract(&stop, &canonical_workspace);
     assert_eq!(stop["state"], json!("stopping"));
 }
@@ -179,19 +203,16 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
     ]);
     assert_contract(&scan, &canonical_workspace);
     assert_eq!(scan["state"], json!("accepted"));
-    let task_id = scan["task_id"].as_u64().expect("scan should return task id");
+    let task_id = scan["task_id"]
+        .as_u64()
+        .expect("scan should return task id");
 
     let status = wait_for_task(&workspace, task_id);
     assert_contract(&status, &canonical_workspace);
     assert_eq!(status["has_active_session"], json!(true));
     assert_eq!(status["tasks"][0]["status"], json!("completed"));
 
-    let filesystems = run_json(&[
-        "filesystems",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let filesystems = run_json(&["filesystems", "--workspace", &workspace_text, "--json"]);
     assert_contract(&filesystems, &canonical_workspace);
     assert_eq!(filesystems["count"], json!(1));
     assert_eq!(filesystems["filesystems"][0]["type"], json!("ext4"));
@@ -231,33 +252,16 @@ fn daemon_workspace_commands_scan_browse_search_select_and_recover() {
     assert_eq!(stat["node"]["path"], json!("/hello.txt"));
     assert_eq!(stat["node"]["size"], json!(18));
 
-    let search = run_json(&[
-        "search",
-        "hello",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let search = run_json(&["search", "hello", "--workspace", &workspace_text, "--json"]);
     assert_contract(&search, &canonical_workspace);
     assert_eq!(search["count"], json!(1));
     assert_eq!(search["matches"][0]["path"], json!("/hello.txt"));
 
-    let selected = run_json(&[
-        "select",
-        "#1",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let selected = run_json(&["select", "#1", "--workspace", &workspace_text, "--json"]);
     assert_contract(&selected, &canonical_workspace);
     assert_eq!(selected["count"], json!(1));
 
-    let selection = run_json(&[
-        "selection",
-        "--workspace",
-        &workspace_text,
-        "--json",
-    ]);
+    let selection = run_json(&["selection", "--workspace", &workspace_text, "--json"]);
     assert_contract(&selection, &canonical_workspace);
     assert_eq!(selection["count"], json!(1));
     assert_eq!(selection["selection"][0]["path"], json!("/hello.txt"));
@@ -288,10 +292,7 @@ fn build_synthetic_ext4_image() -> Vec<u8> {
     builder.write_block_group_descriptor(0, 3);
     builder.write_inode_with_extent(2, 0x4000 | 0o755, 4096, 10, 1);
     builder.write_inode_with_extent(12, 0x8000 | 0o644, 18, 11, 1);
-    builder.write_dir_entries(
-        10,
-        &[(2, 2, "."), (2, 2, ".."), (12, 1, "hello.txt")],
-    );
+    builder.write_dir_entries(10, &[(2, 2, "."), (2, 2, ".."), (12, 1, "hello.txt")]);
     builder.write_data(11, b"RecoverMax says hi");
     builder.build()
 }
